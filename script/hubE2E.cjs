@@ -16,6 +16,10 @@
  */
 const { ethers } = require("ethers");
 const fs = require("fs");
+const path = require("path");
+// Load .env from the repo root (script/ lives one level down) so the flow works
+// regardless of the CWD `node` was invoked from.
+require("dotenv").config({ path: path.join(__dirname, "..", ".env") });
 
 const RPC = "http://34.69.184.205:4545";
 const CHAIN_ID = 648540;
@@ -71,15 +75,55 @@ async function hubSend({ provider, relayer, from, to, callData, gasLimit }) {
   return { tx, receipt, hub };
 }
 
+// Resolve the three keys the flow needs, with friendly fallbacks/aliases so .env is the single
+// source of truth. Fails loudly with an actionable message instead of a cryptic on-chain revert.
+function loadKeys() {
+  // relayer = forward.caller (allowlisted Hub caller); defaults to the deployer PRIVATE_KEY.
+  const relayerPk = process.env.RELAYER_PK || process.env.PRIVATE_KEY;
+  // forward.from = the Hub-PERMISSIONED deployer/signer. Must be the account LNet support allowlisted.
+  const senderPk = process.env.SENDER_PK || process.env.DEPLOYER_PK;
+  // paymaster verifyingSigner key — must match PAYMASTER_SIGNER on-chain.
+  const pmKey = process.env.PAYMASTER_SIGNER_KEY;
+
+  // Only the Hub-permissioned deployer key is truly required. The relayer defaults to PRIVATE_KEY,
+  // and the paymaster is OPTIONAL: on LNET gasPrice=0 so required prefund is 0 — a UserOp needs no
+  // paymaster. If PAYMASTER_SIGNER_KEY is set we sponsor; if blank we run paymaster-less.
+  const missing = [];
+  if (!relayerPk) missing.push("RELAYER_PK (or PRIVATE_KEY)");
+  if (!senderPk) missing.push("SENDER_PK (or DEPLOYER_PK) — the Hub-permissioned deployer key");
+  if (missing.length) {
+    throw new Error(
+      "Missing required key(s) in .env:\n  - " + missing.join("\n  - ") +
+      "\nAdd them to .env and re-run. See docs/lnet-integration.md for which account is which."
+    );
+  }
+
+  const usePaymaster = !!pmKey;
+  if (usePaymaster) {
+    const pmSigner = new ethers.Wallet(pmKey);
+    // Guardrail: paymaster signature only verifies on-chain if this key matches PAYMASTER_SIGNER.
+    const expectedPm = process.env.PAYMASTER_SIGNER;
+    if (expectedPm && pmSigner.address.toLowerCase() !== expectedPm.toLowerCase()) {
+      throw new Error(
+        `PAYMASTER_SIGNER_KEY address ${pmSigner.address} does not match PAYMASTER_SIGNER ${expectedPm}.\n` +
+        "handleOps would revert on the paymaster signature. Use the private key for " + expectedPm + "."
+      );
+    }
+  }
+  return { relayerPk, senderPk, pmKey, usePaymaster };
+}
+
 async function main() {
+  const keys = loadKeys();
   const provider = new ethers.JsonRpcProvider(RPC, CHAIN_ID);
-  const relayer = new ethers.Wallet(process.env.RELAYER_PK, provider);
-  const paymasterSigner = new ethers.Wallet(process.env.PAYMASTER_SIGNER_KEY, provider);
+  const relayer = new ethers.Wallet(keys.relayerPk, provider);
+  const paymasterSigner = keys.usePaymaster ? new ethers.Wallet(keys.pmKey, provider) : null;
   const owner = ethers.Wallet.createRandom();          // AA account owner (signs UserOp; never sends a tx)
-  const forwardSigner = new ethers.Wallet(process.env.SENDER_PK); // Hub Forward `from` — MUST be an LNet-permissioned deployer
+  const forwardSigner = new ethers.Wallet(keys.senderPk); // Hub Forward `from` — MUST be an LNet-permissioned deployer
 
   console.log("relayer:       ", relayer.address);
-  console.log("paymasterSigner:", paymasterSigner.address);
+  console.log("deployer(from):", forwardSigner.address);
+  console.log("paymaster:     ", keys.usePaymaster ? `sponsored via ${paymasterSigner.address}` : "NONE (paymaster-less; prefund=0 on LNET)");
   console.log("account owner: ", owner.address);
 
   const factory = new ethers.Contract(FACTORY, FACTORY_ABI, provider);
@@ -115,19 +159,23 @@ async function main() {
     gasFees: pack(0, 0), paymasterAndData: "0x", signature: "0x",
   };
 
-  // Paymaster sponsorship signature
-  const validUntil = BigInt(Math.floor(Date.now() / 1000) + 3600);
-  const validAfter = 0n;
-  const pmHeader = ethers.concat([
-    PAYMASTER,
-    ethers.zeroPadValue(ethers.toBeHex(500_000n), 16),
-    ethers.zeroPadValue(ethers.toBeHex(100_000n), 16),
-    ethers.AbiCoder.defaultAbiCoder().encode(["uint48", "uint48"], [validUntil, validAfter]),
-  ]);
-  op.paymasterAndData = pmHeader;
-  const pmHash = await paymaster.getHash(op, validUntil, validAfter);
-  const pmSig = await paymasterSigner.signMessage(ethers.getBytes(pmHash));
-  op.paymasterAndData = ethers.concat([pmHeader, pmSig]);
+  // Paymaster sponsorship signature — only when a paymaster signer key is available. On LNET
+  // (gasPrice=0, required prefund=0) the account can validate without any paymaster, so we leave
+  // paymasterAndData = "0x" when running paymaster-less.
+  if (keys.usePaymaster) {
+    const validUntil = BigInt(Math.floor(Date.now() / 1000) + 3600);
+    const validAfter = 0n;
+    const pmHeader = ethers.concat([
+      PAYMASTER,
+      ethers.zeroPadValue(ethers.toBeHex(500_000n), 16),
+      ethers.zeroPadValue(ethers.toBeHex(100_000n), 16),
+      ethers.AbiCoder.defaultAbiCoder().encode(["uint48", "uint48"], [validUntil, validAfter]),
+    ]);
+    op.paymasterAndData = pmHeader;
+    const pmHash = await paymaster.getHash(op, validUntil, validAfter);
+    const pmSig = await paymasterSigner.signMessage(ethers.getBytes(pmHash));
+    op.paymasterAndData = ethers.concat([pmHeader, pmSig]);
+  }
 
   // Owner signature over the EntryPoint userOpHash
   const userOpHash = await entryPoint.getUserOpHash(op);
@@ -155,4 +203,15 @@ async function main() {
   }
 }
 
-main().catch((e) => { console.error("❌", e.message || e); process.exit(1); });
+// Known LACChain Hub custom-error selectors → human-readable cause.
+const HUB_ERRORS = {
+  "0xfc336c41": "Hub rejected forward.from: that account is NOT a permissioned Hub deployer.\n" +
+    "   Fix: set SENDER_PK in .env to the LNet-permissioned deployer key (not the raw-tx deployer).",
+};
+function explain(e) {
+  const data = e?.data || e?.info?.error?.data || (typeof e?.error?.data === "string" ? e.error.data : null);
+  const sel = typeof data === "string" ? data.slice(0, 10) : null;
+  if (sel && HUB_ERRORS[sel]) return `Hub reverted (${sel}):\n   ${HUB_ERRORS[sel]}`;
+  return e.message || String(e);
+}
+main().catch((e) => { console.error("❌", explain(e)); process.exit(1); });
