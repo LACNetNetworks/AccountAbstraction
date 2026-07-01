@@ -31,6 +31,13 @@ forge script script/DeployStack.s.sol --rpc-url lnet_testnet --broadcast --legac
 
 ## LNET gotchas (do not forget these)
 
+- **No raw transactions.** LNET rejects any direct tx with `-32007 "Sender account not authorized"`.
+  Only allowlisted **relayer** accounts may send txs, and only to the LACChain **PermissionedMetaTxHub**
+  (`0x4053cA6bcdEc6638d9Ad83a5c74d0246C7670ACd` on testnet). `handleOps` must be wrapped as a Hub
+  meta-tx — see `docs/lnet-integration.md` and the working `script/hubE2E.cjs`. `forge script --broadcast`
+  / `cast send` only worked for the initial deploys while the deployer still had raw-tx permission; the
+  live AA flow goes through the Hub. Two accounts must be LNet-permissioned: the **relayer**
+  (`forward.caller`) and the **deployer** (`forward.from`); the AA account owner does NOT.
 - **`--legacy --with-gas-price 0` on every broadcast.** LNET has no EIP-1559 fee market and gas is
   free. UserOps must set `maxFeePerGas = maxPriorityFeePerGas = 0` (see the `gasFees` packing in
   tests). Anything assuming a non-zero fee market will break here.
