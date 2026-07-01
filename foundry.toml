@@ -1,0 +1,23 @@
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc = "0.8.23"
+optimizer = true
+optimizer_runs = 200
+via_ir = false
+evm_version = "paris"
+ffi = false
+fs_permissions = [{ access = "read-write", path = "./deployments" }]
+
+remappings = [
+    "@account-abstraction/=lib/account-abstraction/contracts/",
+    "@openzeppelin/contracts/=lib/openzeppelin-contracts/contracts/",
+    "forge-std/=lib/forge-std/src/",
+]
+
+# LNET (LACChain) testnet — permissioned EVM, gasPrice = 0
+[rpc_endpoints]
+lnet_testnet = "${LNET_TESTNET_RPC_URL}"
+
+# LACChain does not expose an Etherscan-compatible API; contract verification is manual.

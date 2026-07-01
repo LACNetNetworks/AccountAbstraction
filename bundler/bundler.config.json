@@ -1,0 +1,16 @@
+{
+  "network": "http://34.69.184.205:4545",
+  "chainId": 648540,
+  "entryPoint": "0x0000000000000000000000000000000000000000",
+  "beneficiary": "0x0000000000000000000000000000000000000000",
+  "mnemonic": "./bundler.mnemonic.txt",
+  "gasFactor": "1",
+  "minBalance": "0",
+  "maxBundleGas": 5000000,
+  "minStake": "0",
+  "minUnstakeDelay": 0,
+  "autoBundleInterval": 3,
+  "autoBundleMempoolSize": 10,
+  "unsafe": true,
+  "conditionalRpc": false
+}

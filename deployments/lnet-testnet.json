@@ -1,0 +1,21 @@
+{
+  "network": "lnet-testnet",
+  "chainId": 648540,
+  "rpcUrl": "http://34.69.184.205:4545",
+  "client": "besu/v23.10.2",
+  "deployer": "0x248906Bf539e8f16FbD14c001f7Bd3D712f95D3E",
+  "contracts": {
+    "EntryPoint": "0x9fD181236dA8c890bD5007b44B80E395E130c57D",
+    "LnetAccountFactory": "0x5589A0E344688976e473FD56BAe94411d9d56f67",
+    "LnetAccountImplementation": "0x16C51443f0EA889DcDE44bF5D06140519748cd58",
+    "LnetVerifyingPaymaster": "0xafed236702eF6F90B31560Fab884433057764B99"
+  },
+  "paymaster": {
+    "verifyingSigner": "0x5fB09D06843f407982adCBe99453792769b6dD38"
+  },
+  "notes": [
+    "EntryPoint is a self-deployed instance of the canonical eth-infinitism v0.7 EntryPoint; the canonical 0x0000...0032 address is NOT present on LNET.",
+    "gasPrice = 0; all broadcasts use --legacy --with-gas-price 0.",
+    "Reads: `cast call \"sig()(type)\"` returns -32602 on this Besu node; use `cast rpc eth_call` with a raw selector instead."
+  ]
+}
