@@ -1,5 +1,5 @@
 /**
- * Live E2E of the ERC-4337 stack on LNET, routed through the LACChain PermissionedMetaTxHub.
+ * Live E2E of the ERC-4337 stack on LNET, routed through the LNET PermissionedMetaTxHub.
  *
  * On LNET only allowlisted relayers may send raw txs, and only to the Hub. So the ERC-4337
  * `handleOps` call is wrapped as a Hub meta-tx:
@@ -203,7 +203,7 @@ async function main() {
   }
 }
 
-// Known LACChain Hub custom-error selectors → human-readable cause.
+// Known LNET Hub custom-error selectors → human-readable cause.
 const HUB_ERRORS = {
   "0xfc336c41": "Hub rejected forward.from: that account is NOT a permissioned Hub deployer.\n" +
     "   Fix: set SENDER_PK in .env to the LNet-permissioned deployer key (not the raw-tx deployer).",

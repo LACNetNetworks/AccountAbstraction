@@ -1,5 +1,5 @@
 /**
- * Live E2E of the ERC-4337 stack on LNET, WITHOUT the LACChain PermissionedMetaTxHub.
+ * Live E2E of the ERC-4337 stack on LNET, WITHOUT the LNET PermissionedMetaTxHub.
  *
  * This is the Hub-less variant of script/hubE2E.cjs. It assumes the bundler/relayer account has
  * been granted DIRECT raw-tx (writer) permission on LNET so it can send transactions straight to

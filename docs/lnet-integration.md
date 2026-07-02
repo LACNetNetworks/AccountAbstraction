@@ -1,10 +1,10 @@
-# Running the ERC-4337 stack on LNET (LACChain)
+# Running the ERC-4337 stack on LNET
 
 LNET is a permissioned Hyperledger Besu network with `gasPrice = 0`. The critical constraint that
 shapes everything:
 
 > **No account can send a raw transaction directly.** Only allowlisted **relayer** accounts may send
-> transactions, and only **to the LACChain `PermissionedMetaTxHub`**. Everything else is rejected at
+> transactions, and only **to the LNET `PermissionedMetaTxHub`**. Everything else is rejected at
 > the node with JSON-RPC error `-32007 "Sender account not authorized to send transactions"`.
 
 This means the ERC-4337 `handleOps` call cannot be sent straight to the EntryPoint by an ordinary

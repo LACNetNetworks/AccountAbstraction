@@ -16,8 +16,8 @@ remappings = [
     "forge-std/=lib/forge-std/src/",
 ]
 
-# LNET (LACChain) testnet — permissioned EVM, gasPrice = 0
+# LNET testnet — permissioned EVM, gasPrice = 0
 [rpc_endpoints]
 lnet_testnet = "${LNET_TESTNET_RPC_URL}"
 
-# LACChain does not expose an Etherscan-compatible API; contract verification is manual.
+# LNET does not expose an Etherscan-compatible API; contract verification is manual.

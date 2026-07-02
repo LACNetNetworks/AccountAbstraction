@@ -4,8 +4,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-An ERC-4337 **v0.7** Account Abstraction stack (Foundry/Solidity) targeting the **LNET network on
-LACChain**, testnet first. LNET is a **permissioned EVM with `gasPrice = 0`** — this single fact
+An ERC-4337 **v0.7** Account Abstraction stack (Foundry/Solidity) targeting the **LNET
+network**, testnet first. LNET is a **permissioned EVM with `gasPrice = 0`** — this single fact
 drives most of the non-obvious decisions below.
 
 ## Commands
@@ -32,7 +32,7 @@ forge script script/DeployStack.s.sol --rpc-url lnet_testnet --broadcast --legac
 ## LNET gotchas (do not forget these)
 
 - **No raw transactions.** LNET rejects any direct tx with `-32007 "Sender account not authorized"`.
-  Only allowlisted **relayer** accounts may send txs, and only to the LACChain **PermissionedMetaTxHub**
+  Only allowlisted **relayer** accounts may send txs, and only to the LNET **PermissionedMetaTxHub**
   (`0x4053cA6bcdEc6638d9Ad83a5c74d0246C7670ACd` on testnet). `handleOps` must be wrapped as a Hub
   meta-tx — see `docs/lnet-integration.md` and the working `script/hubE2E.cjs`. `forge script --broadcast`
   / `cast send` only worked for the initial deploys while the deployer still had raw-tx permission; the
