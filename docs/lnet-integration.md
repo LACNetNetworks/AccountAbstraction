@@ -79,6 +79,56 @@ Verified run (block ~59,049,713):
 - Smart account: `0x4818C1b33327978d69722D165A2603eE8C77b3F2`
 - `handleOps` via Hub: `0xf8227d3a88559dd0e9ebcfab2ca9ac20f2714881ddebaa4398b339f7b8be95b8` (status 1)
 
+## Hub-less variant (direct raw-tx)
+
+The Hub is a **network-access** requirement, not part of the ERC-4337 contracts — none of `src/`,
+the tests, nor the EntryPoint reference the Hub. So if LNet support grants the bundler/relayer
+account **direct raw-tx (writer) permission**, `handleOps` can be sent straight to the EntryPoint and
+the Hub is skipped entirely:
+
+```
+relayer EOA ──▶ EntryPoint.handleOps([userOp], beneficiary)   ← plain legacy tx, gasPrice = 0
+                     └──▶ account.validateUserOp / execute ──▶ target
+```
+
+What changes versus the Hub path:
+
+| | Hub path (`hubE2E.cjs`) | Hub-less (`directE2E.cjs`) |
+| --- | --- | --- |
+| Storage deploy | `Hub.execute` (CREATE), `ContractDeployed` event | direct contract-creation tx |
+| `handleOps` | wrapped in `Hub.execute` meta-tx | direct `EntryPoint.handleOps` tx |
+| Permissioned accounts | **two**: `forward.caller` + `forward.from` | **one**: the relayer/bundler EOA |
+| Env keys | `RELAYER_PK` + `SENDER_PK` | `RELAYER_PK` (or `PRIVATE_KEY`) only |
+
+### What to permission (testnet)
+
+Because the only transaction target in ERC-4337 is the EntryPoint (factory, paymaster and account
+are internal message calls inside `handleOps`), the grant collapses to a single account and a single
+target:
+
+| Item | Testnet address | Permission |
+| --- | --- | --- |
+| **relayer / bundler EOA** (`PRIVATE_KEY`) | *your key* | **direct raw-tx (writer)** — required |
+| **EntryPoint** | `0x9fD181236dA8c890bD5007b44B80E395E130c57D` | allowed call target for the relayer |
+| LnetAccountFactory | `0x5589A0E344688976e473FD56BAe94411d9d56f67` | none (called by EntryPoint via `initCode`) |
+| LnetVerifyingPaymaster | `0xafed236702eF6F90B31560Fab884433057764B99` | none (internal to EntryPoint) |
+
+The deployer account additionally needs raw-tx permission only if you intend to **re-deploy**
+contracts (EntryPoint/factory/paymaster/Storage) without the Hub; it can be the same account as the
+relayer. As with the Hub path, the AA account **owner** never needs permissioning.
+
+### Running it
+
+```bash
+forge build   # produces out/Storage.sol/Storage.json used by the script
+# .env: RELAYER_PK (or PRIVATE_KEY) with direct raw-tx permission; PAYMASTER_SIGNER_KEY optional
+node script/directE2E.cjs
+```
+
+If the relayer lacks direct permission, the node rejects the tx with `-32007 "Sender account not
+authorized"` and the script prints an actionable message pointing back to `hubE2E.cjs`. Addresses are
+overridable via `ENTRYPOINT_ADDRESS` / `FACTORY_ADDRESS` / `PAYMASTER_ADDRESS` env vars.
+
 ## Implications for AA on LNET
 
 - The **bundler must be an LNet-permissioned relayer** (or route through one). A public/permissionless
@@ -86,4 +136,5 @@ Verified run (block ~59,049,713):
 - Smart accounts are still counterfactual and created on-demand via `initCode` — they do **not** need
   individual permissioning, because they never originate a transaction.
 - `gasPrice = 0`, so paymaster sponsorship is a policy/allow-list gate, not economic subsidy.
-- Direct `forge`/`cast` broadcasts (raw txs) will always fail with `-32007`; use the Hub path.
+- Direct `forge`/`cast` broadcasts (raw txs) fail with `-32007` **unless the sending account holds
+  direct raw-tx permission**; without that grant, use the Hub path. See *Hub-less variant* above.
