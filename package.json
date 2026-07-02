@@ -9,7 +9,9 @@
     "test": "test"
   },
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "bundler": "node bundler/src/index.js",
+    "bundler:check": "node --check bundler/src/index.js",
+    "test": "forge test"
   },
   "repository": {
     "type": "git",

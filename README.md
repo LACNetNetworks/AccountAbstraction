@@ -15,7 +15,8 @@ sponsorship (paymaster) primarily as a policy/allow-list gate rather than for ec
 | `LnetVerifyingPaymaster` | `src/LnetVerifyingPaymaster.sol` | Sponsors UserOps signed by an off-chain verifying signer. |
 | EntryPoint (canonical v0.7) | `lib/account-abstraction` | Reference EntryPoint; deploy via `script/DeployEntryPoint.s.sol`. |
 
-The **bundler** is an off-chain service — see [`bundler/README.md`](bundler/README.md).
+The **bundler** is an off-chain service implemented in this repo for LNET's private testnet flow —
+see [`bundler/README.md`](bundler/README.md).
 
 ## Quick start
 
