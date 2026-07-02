@@ -1,25 +1,33 @@
-# LNET private bundler
+# LNET direct bundler
 
 This directory contains a small ERC-4337 v0.7 JSON-RPC bundler for LNET testnet.
+
+The bundler follows the same transaction path as `script/directE2E.cjs`:
+
+```text
+relayer EOA -> EntryPoint.handleOps([userOp], beneficiary)
+```
+
+It does **not** route through `PermissionedMetaTxHub`. The relayer key must therefore have direct
+raw-tx writer permission on LNET, and the EntryPoint must be an allowed call target for that relayer.
 
 It is intentionally private and single-operator:
 
 - accepts UserOps through `eth_sendUserOperation`
 - keeps an in-memory mempool
 - batches pending ops into `EntryPoint.handleOps`
-- routes the bundle through `PermissionedMetaTxHub.execute` by default
-- uses legacy transactions with `gasPrice = 0`
+- sends legacy transactions with `gasPrice = 0`
 - rejects non-zero packed `gasFees` by default
 
 It does **not** implement P2P mempool, reputation, stake policy, profitability checks, or signature
-aggregators. That is acceptable for the current LNET testnet flow, where the network itself is
-permissioned and gas is free.
+aggregators. That is acceptable for the current LNET testnet flow, where the network is permissioned
+and gas is free.
 
 ## Start
 
 ```bash
 cp .env.example .env
-# Fill RELAYER_PK and SENDER_PK for Hub mode.
+# Fill RELAYER_PK with an LNET relayer that has direct raw-tx writer permission.
 npm run bundler
 ```
 
@@ -36,21 +44,11 @@ curl -sS http://127.0.0.1:3000 \
 
 ## Required environment
 
-Hub mode is the default and matches the normal LNET path:
-
 ```bash
-BUNDLER_MODE=hub
-RELAYER_PK=0x... # forward.caller, allowlisted Hub caller
-SENDER_PK=0x...  # forward.from, Hub-permissioned signer/deployer
-```
-
-Direct mode skips the Hub and sends `handleOps` straight to the EntryPoint. Use it only if LNET
-support granted direct raw-tx writer permission to the relayer:
-
-```bash
-BUNDLER_MODE=direct
 RELAYER_PK=0x...
 ```
+
+`RELAYER_PK` can fall back to `PRIVATE_KEY`, matching `script/directE2E.cjs`.
 
 Optional settings:
 
@@ -59,8 +57,8 @@ Optional settings:
 | `LNET_TESTNET_RPC_URL` | config `network` | LNET RPC URL |
 | `LNET_TESTNET_CHAIN_ID` | `648540` | LNET chain ID |
 | `ENTRYPOINT_ADDRESS` | deployed testnet EntryPoint | Supported EntryPoint |
-| `LNET_HUB_ADDRESS` | testnet Hub | PermissionedMetaTxHub |
 | `BUNDLER_BENEFICIARY` | relayer address | `handleOps` beneficiary |
+| `BUNDLER_BUNDLE_GAS_LIMIT` | `8000000` | Gas limit for the direct `handleOps` transaction |
 | `BUNDLER_SIMULATION` | `try` | `try`, `required`, or `disabled` |
 | `BUNDLER_ENFORCE_ZERO_GAS_FEES` | true | Reject non-zero packed UserOp fees |
 
@@ -103,3 +101,6 @@ The bundler expects ERC-4337 v0.7 `PackedUserOperation` fields:
 ```
 
 On LNET, `gasFees` must pack `maxPriorityFeePerGas = 0` and `maxFeePerGas = 0`.
+
+If LNET returns `-32007 "Sender account not authorized"`, the relayer does not have the direct
+raw-tx permission required by this bundler.

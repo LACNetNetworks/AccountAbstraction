@@ -20,26 +20,8 @@ const ENTRYPOINT_ABI = [
   "event UserOperationEvent(bytes32 indexed userOpHash,address indexed sender,address indexed paymaster,uint256 nonce,bool success,uint256 actualGasCost,uint256 actualGasUsed)",
 ];
 
-const HUB_ABI = [
-  "function execute((address from,address to,uint256 value,uint32 space,uint256 nonce,uint256 deadline,bytes32 dataHash,address caller) forward, bytes callData, bytes signature) payable",
-];
-
-const FORWARD_TYPES = {
-  Forward: [
-    { name: "from", type: "address" },
-    { name: "to", type: "address" },
-    { name: "value", type: "uint256" },
-    { name: "space", type: "uint32" },
-    { name: "nonce", type: "uint256" },
-    { name: "deadline", type: "uint256" },
-    { name: "dataHash", type: "bytes32" },
-    { name: "caller", type: "address" },
-  ],
-};
-
 const ZERO_BYTES32 = ethers.ZeroHash;
 const ZERO_ADDRESS = ethers.ZeroAddress;
-const DEFAULT_HUB = "0x4053cA6bcdEc6638d9Ad83a5c74d0246C7670ACd";
 
 function parseArgs(argv) {
   const args = {};
@@ -93,13 +75,10 @@ function loadConfig() {
     chainId: Number(process.env.LNET_TESTNET_CHAIN_ID || fileConfig.chainId || deployments.chainId || 648540),
     entryPoint,
     beneficiary,
-    hub: process.env.LNET_HUB_ADDRESS || fileConfig.hub || DEFAULT_HUB,
-    mode: process.env.BUNDLER_MODE || fileConfig.mode || "hub",
     simulationMode: process.env.BUNDLER_SIMULATION || fileConfig.simulation || "try",
     maxBundleSize: Number(process.env.BUNDLER_MAX_BUNDLE_SIZE || fileConfig.maxBundleSize || fileConfig.autoBundleMempoolSize || 10),
     autoBundleIntervalMs: Number(process.env.BUNDLER_AUTO_BUNDLE_MS || fileConfig.autoBundleIntervalMs || ((fileConfig.autoBundleInterval || 3) * 1000)),
-    hubGasLimit: BigInt(process.env.BUNDLER_HUB_GAS_LIMIT || fileConfig.hubGasLimit || 8_000_000),
-    directGasLimit: BigInt(process.env.BUNDLER_DIRECT_GAS_LIMIT || fileConfig.directGasLimit || 8_000_000),
+    bundleGasLimit: BigInt(process.env.BUNDLER_BUNDLE_GAS_LIMIT || fileConfig.bundleGasLimit || 8_000_000),
     enforceZeroGasFees: process.env.BUNDLER_ENFORCE_ZERO_GAS_FEES !== "false" && fileConfig.enforceZeroGasFees !== false,
     logLevel: process.env.BUNDLER_LOG_LEVEL || fileConfig.logLevel || "info",
   };
@@ -111,27 +90,18 @@ function assertConfig(config) {
     throw new Error("Missing ENTRYPOINT_ADDRESS or bundler.config.json entryPoint");
   }
   if (!ethers.isAddress(config.beneficiary)) throw new Error("BUNDLER_BENEFICIARY must be an address");
-  if (!["hub", "direct"].includes(config.mode)) throw new Error("BUNDLER_MODE must be 'hub' or 'direct'");
   if (!["try", "required", "disabled"].includes(config.simulationMode)) {
     throw new Error("BUNDLER_SIMULATION must be 'try', 'required', or 'disabled'");
   }
-  if (config.mode === "hub" && (!ethers.isAddress(config.hub) || config.hub === ZERO_ADDRESS)) {
-    throw new Error("Missing LNET_HUB_ADDRESS or bundler.config.json hub");
-  }
 }
 
-function loadWallets(provider, mode) {
+function loadWallets(provider) {
   const relayerPk = process.env.RELAYER_PK || process.env.PRIVATE_KEY;
-  if (!relayerPk) throw new Error("Missing RELAYER_PK or PRIVATE_KEY for the bundler relayer");
-  const relayer = new ethers.Wallet(relayerPk, provider);
-
-  if (mode === "direct") return { relayer, forwardSigner: null };
-
-  const senderPk = process.env.SENDER_PK || process.env.DEPLOYER_PK;
-  if (!senderPk) {
-    throw new Error("Missing SENDER_PK or DEPLOYER_PK for Hub forward.from in hub mode");
+  if (!relayerPk) {
+    throw new Error("Missing RELAYER_PK or PRIVATE_KEY for the direct raw-tx bundler relayer");
   }
-  return { relayer, forwardSigner: new ethers.Wallet(senderPk) };
+  const relayer = new ethers.Wallet(relayerPk, provider);
+  return { relayer };
 }
 
 function toHex(value) {
@@ -211,10 +181,6 @@ function formatRpcError(err) {
   };
 }
 
-function randomNonce() {
-  return (BigInt(Date.now()) << 160n) | ethers.toBigInt(ethers.randomBytes(20));
-}
-
 function log(config, level, ...args) {
   const order = { debug: 10, info: 20, warn: 30, error: 40 };
   if ((order[level] || 20) >= (order[config.logLevel] || 20)) {
@@ -223,14 +189,10 @@ function log(config, level, ...args) {
 }
 
 function decodeKnownError(err) {
-  const data = err?.data || err?.info?.error?.data || err?.error?.data;
-  if (typeof data === "string" && data.startsWith("0xfc336c41")) {
-    return "Hub rejected forward.from: SENDER_PK/DEPLOYER_PK is not permissioned in the LNET Hub";
-  }
   const code = err?.code ?? err?.info?.error?.code ?? err?.error?.code;
   const msg = err?.message || err?.info?.error?.message || err?.error?.message || String(err);
   if (code === -32007 || /not authorized/i.test(msg)) {
-    return "LNET rejected the tx: relayer is not authorized for this transaction path";
+    return "LNET rejected the direct handleOps tx: relayer lacks direct raw-tx writer permission";
   }
   return msg;
 }
@@ -240,9 +202,7 @@ class LnetBundler {
     this.config = config;
     this.provider = provider;
     this.relayer = wallets.relayer;
-    this.forwardSigner = wallets.forwardSigner;
     this.entryPoint = new ethers.Contract(config.entryPoint, ENTRYPOINT_ABI, this.relayer);
-    this.hub = config.mode === "hub" ? new ethers.Contract(config.hub, HUB_ABI, this.relayer) : null;
     this.mempool = new Map();
     this.history = new Map();
     this.bundling = false;
@@ -380,8 +340,8 @@ class LnetBundler {
     const items = [...this.mempool.values()].slice(0, this.config.maxBundleSize);
     try {
       const ops = items.map((item) => item.op);
-      log(this.config, "info", "submitting bundle", ops.length, "mode", this.config.mode);
-      const tx = this.config.mode === "hub" ? await this.submitViaHub(ops) : await this.submitDirect(ops);
+      log(this.config, "info", "submitting direct bundle", ops.length);
+      const tx = await this.submitDirect(ops);
       const receipt = await tx.wait();
       this.markIncluded(items, receipt);
       log(this.config, "info", "bundle included", tx.hash, "status", receipt.status);
@@ -402,32 +362,7 @@ class LnetBundler {
   async submitDirect(ops) {
     return this.entryPoint.handleOps(ops, this.config.beneficiary, {
       gasPrice: 0n,
-      gasLimit: this.config.directGasLimit,
-    });
-  }
-
-  async submitViaHub(ops) {
-    const callData = this.entryPoint.interface.encodeFunctionData("handleOps", [ops, this.config.beneficiary]);
-    const domain = {
-      name: "PermissionedMetaTxHub",
-      version: "1",
-      chainId: this.config.chainId,
-      verifyingContract: this.config.hub,
-    };
-    const forward = {
-      from: this.forwardSigner.address,
-      to: this.config.entryPoint,
-      value: 0n,
-      space: 0,
-      nonce: randomNonce(),
-      deadline: BigInt(Math.floor(Date.now() / 1000) + 3600),
-      dataHash: ethers.keccak256(callData),
-      caller: this.relayer.address,
-    };
-    const signature = await this.forwardSigner.signTypedData(domain, FORWARD_TYPES, forward);
-    return this.hub.execute(forward, callData, signature, {
-      gasPrice: 0n,
-      gasLimit: this.config.hubGasLimit,
+      gasLimit: this.config.bundleGasLimit,
     });
   }
 
@@ -492,11 +427,10 @@ async function handleRpc(bundler, payload) {
       return bundler.getUserOperationReceipt(params);
     case "lnet_bundlerStatus":
       return {
-        mode: bundler.config.mode,
+        mode: "direct",
         entryPoint: bundler.config.entryPoint,
         beneficiary: bundler.config.beneficiary,
         relayer: bundler.relayer.address,
-        forwardFrom: bundler.forwardSigner?.address || null,
         pending: toHex(bundler.pendingCount()),
       };
     case "lnet_bundleNow":
@@ -555,7 +489,7 @@ async function main() {
   const config = loadConfig();
   assertConfig(config);
   const provider = new ethers.JsonRpcProvider(config.rpcUrl, config.chainId);
-  const wallets = loadWallets(provider, config.mode);
+  const wallets = loadWallets(provider);
   if (config.beneficiary === ZERO_ADDRESS) config.beneficiary = wallets.relayer.address;
   const bundler = new LnetBundler(config, provider, wallets);
 
@@ -570,8 +504,7 @@ async function main() {
   });
   server.listen(config.port, config.host, () => {
     console.log(`LNET bundler listening on http://${config.host}:${config.port}`);
-    console.log(`mode=${config.mode} entryPoint=${config.entryPoint} relayer=${wallets.relayer.address}`);
-    if (wallets.forwardSigner) console.log(`hub=${config.hub} forward.from=${wallets.forwardSigner.address}`);
+    console.log(`mode=direct entryPoint=${config.entryPoint} relayer=${wallets.relayer.address}`);
   });
 }
 
