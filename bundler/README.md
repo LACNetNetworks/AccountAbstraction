@@ -1,4 +1,4 @@
-# Bundler on LNET (LACChain)
+# Bundler on LNET
 
 The bundler is an **off-chain** service. This repo does not implement one; it deploys the on-chain
 stack (EntryPoint, factory, paymaster) and provides configuration to point an existing ERC-4337 v0.7

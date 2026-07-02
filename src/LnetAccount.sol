@@ -13,7 +13,7 @@ import "@account-abstraction/core/Helpers.sol";
 import "@account-abstraction/samples/callback/TokenCallbackHandler.sol";
 
 /**
- * LnetAccount — a minimal ERC-4337 v0.7 smart account for the LNET (LACChain) network.
+ * LnetAccount — a minimal ERC-4337 v0.7 smart account for the LNET network.
  *
  * Single-owner, ECDSA-signature account deployed behind an ERC1967 proxy (see LnetAccountFactory).
  * The implementation is upgradeable via UUPS, gated on the owner. It follows the reference

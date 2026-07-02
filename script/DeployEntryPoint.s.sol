@@ -5,7 +5,7 @@ import "forge-std/Script.sol";
 import "@account-abstraction/core/EntryPoint.sol";
 
 /**
- * Deploys the canonical ERC-4337 v0.7 EntryPoint on LNET (LACChain) testnet.
+ * Deploys the canonical ERC-4337 v0.7 EntryPoint on LNET testnet.
  *
  * Only needed if LNET does not already have a canonical EntryPoint. On public EVM networks the
  * canonical address is 0x0000000071727De22E5E9d8BAf0edAc6f37da032 (deployed via a deterministic

@@ -68,6 +68,27 @@ contract LnetStackTest is Test {
         return abi.encodePacked(r, s, v);
     }
 
+    /// Builds paymasterAndData for `op`, signed with `pmKey`.
+    /// Layout: [paymaster(20)][verifGas(16)][postOpGas(16)][validUntil,validAfter(64)][sig(65)].
+    /// The paymaster hash is taken over the op carrying the header (no sig tail), matching how the
+    /// off-chain signer produces it — see script/hubE2E.cjs / directE2E.cjs.
+    function _sponsor(PackedUserOperation memory op, uint256 pmKey, uint48 validUntil, uint48 validAfter)
+        internal
+        view
+        returns (bytes memory)
+    {
+        bytes memory pmHeader = abi.encodePacked(
+            address(paymaster),
+            uint128(500_000), // paymaster verification gas
+            uint128(100_000), // paymaster postOp gas
+            abi.encode(validUntil, validAfter)
+        );
+        op.paymasterAndData = pmHeader;
+        bytes32 pmHash = MessageHashUtils.toEthSignedMessageHash(paymaster.getHash(op, validUntil, validAfter));
+        (uint8 v, bytes32 r, bytes32 s) = vm.sign(pmKey, pmHash);
+        return abi.encodePacked(pmHeader, abi.encodePacked(r, s, v));
+    }
+
     function test_getAddress_matchesDeployedAccount() public {
         uint256 salt = 1;
         address predicted = factory.getAddress(owner, salt);
@@ -116,22 +137,7 @@ contract LnetStackTest is Test {
         bytes memory callData = abi.encodeCall(LnetAccount.execute, (target, 0, abi.encodeCall(Target.ping, ())));
 
         PackedUserOperation memory op = _baseUserOp(sender, "", callData);
-
-        // Build paymasterAndData: [paymaster(20)][verifGas(16)][postOpGas(16)][validUntil,validAfter(64)][sig]
-        uint48 validUntil = uint48(block.timestamp + 1 hours);
-        uint48 validAfter = 0;
-        bytes memory pmHeader = abi.encodePacked(
-            address(paymaster),
-            uint128(500_000), // paymaster verification gas
-            uint128(100_000), // paymaster postOp gas
-            abi.encode(validUntil, validAfter)
-        );
-        // Sign the paymaster hash over the op that already carries the header (empty sig tail).
-        op.paymasterAndData = pmHeader;
-        bytes32 pmHash = MessageHashUtils.toEthSignedMessageHash(paymaster.getHash(op, validUntil, validAfter));
-        (uint8 v, bytes32 r, bytes32 s) = vm.sign(signerKey, pmHash);
-        op.paymasterAndData = abi.encodePacked(pmHeader, abi.encodePacked(r, s, v));
-
+        op.paymasterAndData = _sponsor(op, signerKey, uint48(block.timestamp + 1 hours), 0);
         op.signature = _sign(op);
 
         PackedUserOperation[] memory ops = new PackedUserOperation[](1);
@@ -139,6 +145,54 @@ contract LnetStackTest is Test {
 
         entryPoint.handleOps(ops, payable(beneficiary));
         assertEq(Target(target).pings(), 1, "sponsored op did not execute");
+    }
+
+    /// Mirrors the live directE2E flow: a single sponsored UserOp both deploys the account (via
+    /// initCode) and executes through it.
+    function test_paymaster_sponsorsDeployAndExecute() public {
+        uint256 salt = 5;
+        address sender = factory.getAddress(owner, salt);
+
+        bytes memory initCode =
+            abi.encodePacked(address(factory), abi.encodeCall(LnetAccountFactory.createAccount, (owner, salt)));
+        address target = address(new Target());
+        bytes memory callData = abi.encodeCall(LnetAccount.execute, (target, 0, abi.encodeCall(Target.ping, ())));
+
+        PackedUserOperation memory op = _baseUserOp(sender, initCode, callData);
+        op.paymasterAndData = _sponsor(op, signerKey, uint48(block.timestamp + 1 hours), 0);
+        op.signature = _sign(op);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = op;
+
+        entryPoint.handleOps(ops, payable(beneficiary));
+
+        assertGt(sender.code.length, 0, "account not deployed by sponsored op");
+        assertEq(Target(target).pings(), 1, "sponsored deploy+exec did not run");
+    }
+
+    /// The paymaster is a policy gate: a sponsorship signed by anyone other than the verifyingSigner
+    /// must be rejected by the EntryPoint (AA34), and the op must not execute.
+    function test_paymaster_rejectsWrongSigner() public {
+        uint256 salt = 6;
+        address sender = factory.getAddress(owner, salt);
+        factory.createAccount(owner, salt);
+
+        address target = address(new Target());
+        bytes memory callData = abi.encodeCall(LnetAccount.execute, (target, 0, abi.encodeCall(Target.ping, ())));
+
+        PackedUserOperation memory op = _baseUserOp(sender, "", callData);
+        uint256 wrongKey = 0xBAD; // not the paymaster verifyingSigner
+        op.paymasterAndData = _sponsor(op, wrongKey, uint48(block.timestamp + 1 hours), 0);
+        op.signature = _sign(op);
+
+        PackedUserOperation[] memory ops = new PackedUserOperation[](1);
+        ops[0] = op;
+
+        vm.expectRevert(abi.encodeWithSelector(IEntryPoint.FailedOp.selector, uint256(0), "AA34 signature error"));
+        entryPoint.handleOps(ops, payable(beneficiary));
+
+        assertEq(Target(target).pings(), 0, "op must not execute with an invalid paymaster signature");
     }
 }
 

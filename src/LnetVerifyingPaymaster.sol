@@ -10,7 +10,7 @@ import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 
 /**
- * LnetVerifyingPaymaster — sponsors gas for UserOperations on LNET (LACChain).
+ * LnetVerifyingPaymaster — sponsors gas for UserOperations on LNET.
  *
  * An off-chain service (the "verifying signer") decides which UserOps to sponsor and signs a hash
  * over their fields plus a [validAfter, validUntil] validity window. This contract only verifies

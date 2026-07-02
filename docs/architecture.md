@@ -29,7 +29,7 @@ User ──sign──▶ UserOp ──▶ Bundler (off-chain) ──handleOps─
 The **EntryPoint** is the canonical eth-infinitism v0.7 contract from `lib/account-abstraction`; we
 deploy an instance rather than fork it.
 
-## LNET (LACChain) specifics
+## LNET specifics
 
 - **`gasPrice = 0`.** UserOps set `maxFeePerGas = maxPriorityFeePerGas = 0`. The required prefund is
   therefore 0, so neither the account nor the paymaster needs an EntryPoint deposit to transact. The
