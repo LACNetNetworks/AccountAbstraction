@@ -216,6 +216,10 @@ class LnetBundler {
     return toHex(this.config.chainId);
   }
 
+  async proxyRpc(method, params) {
+    return this.provider.send(method, params);
+  }
+
   async sendUserOperation(params) {
     const [rawOp, entryPointAddress] = params;
     const entryPoint = normalizeAddress(entryPointAddress, "entryPoint");
@@ -257,9 +261,12 @@ class LnetBundler {
         throw rpcError(-32602, "signature aggregators are not supported by this LNET bundler");
       }
     } catch (err) {
+      const revertData = err?.data || err?.info?.error?.data || err?.error?.data;
+      const noRevertData = revertData == null || revertData === "0x";
       const unsupported =
         err.code === "BAD_DATA" ||
-        /could not decode result data|function selector was not recognized|missing revert data/i.test(err.message || "");
+        noRevertData ||
+        /could not decode result data|function selector was not recognized|missing revert data|no data present|require\(false\)/i.test(err.message || "");
       if (unsupported && this.config.simulationMode === "try") {
         log(this.config, "warn", "simulateValidation unavailable on EntryPoint; accepting op in try mode");
         return;
@@ -415,6 +422,12 @@ async function handleRpc(bundler, payload) {
   switch (payload.method) {
     case "eth_chainId":
       return bundler.chainId();
+    case "eth_call":
+    case "eth_getCode":
+    case "eth_blockNumber":
+    case "eth_getBalance":
+    case "eth_getTransactionReceipt":
+      return bundler.proxyRpc(payload.method, params);
     case "eth_supportedEntryPoints":
       return bundler.supportedEntryPoints();
     case "eth_sendUserOperation":
@@ -442,13 +455,25 @@ async function handleRpc(bundler, payload) {
 
 function createServer(bundler) {
   return http.createServer(async (req, res) => {
+    const corsHeaders = {
+      "access-control-allow-origin": "*",
+      "access-control-allow-methods": "GET,POST,OPTIONS",
+      "access-control-allow-headers": "content-type",
+    };
+
+    if (req.method === "OPTIONS") {
+      res.writeHead(204, corsHeaders);
+      res.end();
+      return;
+    }
+
     if (req.method === "GET" && req.url === "/health") {
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { ...corsHeaders, "content-type": "application/json" });
       res.end(JSON.stringify({ ok: true, pending: bundler.pendingCount() }));
       return;
     }
     if (req.method !== "POST") {
-      res.writeHead(405, { "content-type": "application/json" });
+      res.writeHead(405, { ...corsHeaders, "content-type": "application/json" });
       res.end(JSON.stringify({ error: "method not allowed" }));
       return;
     }
@@ -463,7 +488,7 @@ function createServer(bundler) {
       try {
         payload = JSON.parse(body);
       } catch {
-        res.writeHead(400, { "content-type": "application/json" });
+        res.writeHead(400, { ...corsHeaders, "content-type": "application/json" });
         res.end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "parse error" } }));
         return;
       }
@@ -479,7 +504,7 @@ function createServer(bundler) {
           }
         })
       );
-      res.writeHead(200, { "content-type": "application/json" });
+      res.writeHead(200, { ...corsHeaders, "content-type": "application/json" });
       res.end(JSON.stringify(Array.isArray(payload) ? responses : responses[0]));
     });
   });

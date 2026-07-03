@@ -18,6 +18,10 @@ sponsorship (paymaster) primarily as a policy/allow-list gate rather than for ec
 The **bundler** is an off-chain service implemented in this repo for LNET's private testnet flow —
 see [`bundler/README.md`](bundler/README.md).
 
+There is also a browser example for Google login with Privy embedded wallets. It signs an
+ERC-4337 v0.7 UserOp in the frontend and sends it to the local direct bundler:
+[`examples/privy-google-aa/README.md`](examples/privy-google-aa/README.md).
+
 ## Quick start
 
 ```bash
@@ -156,6 +160,30 @@ paymaster:           sponsored via 0x5fB09D06843f407982adCBe99453792769b6dD38
 
 Contract addresses default to the deployed testnet instances and can be overridden via
 `ENTRYPOINT_ADDRESS` / `FACTORY_ADDRESS` / `PAYMASTER_ADDRESS`.
+
+## Browser demo: Google login -> bundler
+
+The frontend example in `examples/privy-google-aa` demonstrates this flow:
+
+```text
+Google login -> Privy embedded EOA -> sign UserOp hash -> local direct bundler -> EntryPoint.handleOps
+```
+
+Use it when you want to test the AA flow from a browser without exposing the relayer key. The browser
+only signs the UserOp with the Google-created embedded wallet; the local bundler sends the LNET
+transaction with the permissioned relayer.
+
+Start the services:
+
+```bash
+./bundler/test-service/start-bundler.sh
+cd examples/privy-google-aa
+npm install
+npm run dev
+```
+
+Open `http://127.0.0.1:5173`. Full setup, Privy dashboard requirements, CORS notes, and
+troubleshooting are in [`examples/privy-google-aa/README.md`](examples/privy-google-aa/README.md).
 
 ## Deploy to LNET testnet
 

@@ -12,3 +12,4 @@ out/
 
 # Node (bundler tooling)
 node_modules/
+dist/

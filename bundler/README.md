@@ -82,6 +82,17 @@ Local operator methods:
 - `lnet_bundlerStatus`
 - `lnet_bundleNow`
 
+Read-only proxy methods:
+
+- `eth_call`
+- `eth_getCode`
+- `eth_blockNumber`
+- `eth_getBalance`
+- `eth_getTransactionReceipt`
+
+These are proxied to the configured LNET RPC. They exist so browser examples can use the local
+bundler as a CORS-friendly read RPC instead of calling the private LNET RPC directly.
+
 ## Client notes
 
 The bundler expects ERC-4337 v0.7 `PackedUserOperation` fields:
@@ -104,3 +115,18 @@ On LNET, `gasFees` must pack `maxPriorityFeePerGas = 0` and `maxFeePerGas = 0`.
 
 If LNET returns `-32007 "Sender account not authorized"`, the relayer does not have the direct
 raw-tx permission required by this bundler.
+
+## Test service helpers
+
+The scripts in `bundler/test-service` provide the quickest manual loop:
+
+```bash
+cp .env bundler/test-service/.env
+./bundler/test-service/start-bundler.sh
+./bundler/test-service/test-curl.sh
+./bundler/test-service/test-storage-via-bundler.sh
+```
+
+The storage test deploys `Storage` with the direct relayer, builds a UserOp that creates an
+`LnetAccount`, sends it through `eth_sendUserOperation`, waits for the bundler receipt, and verifies
+that `Storage.value()` is `42`.
