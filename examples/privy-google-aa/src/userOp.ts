@@ -1,6 +1,7 @@
 import { BrowserProvider, Contract, Interface, JsonRpcProvider, concat, getBytes, toBeHex, zeroPadValue } from "ethers";
 import type { Eip1193Provider } from "ethers";
 import { lnet } from "./lnet";
+import { getBundlerToken } from "./token";
 
 const UO =
   "(address sender,uint256 nonce,bytes initCode,bytes callData,bytes32 accountGasLimits,uint256 preVerificationGas,bytes32 gasFees,bytes paymasterAndData,bytes signature)";
@@ -31,10 +32,18 @@ export type SendUserOpResult = {
   receipt: unknown;
 };
 
+const STORAGE_READ_ABI = ["function value() view returns (uint256)"];
+
 const provider = new JsonRpcProvider(lnet.rpcUrl, lnet.id);
 const factory = new Contract(lnet.factory, FACTORY_ABI, provider);
 const entryPoint = new Contract(lnet.entryPoint, ENTRYPOINT_ABI, provider);
 const accountIface = new Interface(ACCOUNT_ABI);
+
+// Reads Storage.value() through the bundler's read RPC proxy (no token needed).
+export async function readStorageValue(address: string): Promise<bigint> {
+  const storage = new Contract(address, STORAGE_READ_ABI, provider);
+  return storage.value();
+}
 
 function pack128(hi: bigint | number, lo: bigint | number): string {
   return zeroPadValue(toBeHex((BigInt(hi) << 128n) | BigInt(lo)), 32);
@@ -60,17 +69,37 @@ function serializeUserOp(op: PackedUserOperation) {
   };
 }
 
-async function bundlerRpc<T>(method: string, params: unknown[]): Promise<T> {
+async function bundlerRpc<T>(method: string, params: unknown[], token?: string): Promise<T> {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (token) headers.authorization = `Bearer ${token}`;
   const response = await fetch(lnet.bundlerUrl, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
   });
   const payload = await response.json();
   if (payload.error) {
-    throw new Error(`${payload.error.message}${payload.error.data ? `\n${payload.error.data}` : ""}`);
+    const err = new Error(`${payload.error.message}${payload.error.data ? `\n${payload.error.data}` : ""}`);
+    (err as { code?: number }).code = payload.error.code;
+    throw err;
   }
   return payload.result as T;
+}
+
+// Write methods (eth_sendUserOperation) require a Keycloak bearer token from the
+// backend. If the bundler rejects the token as unauthorized (-32001, e.g. expired),
+// refresh once and retry.
+async function bundlerSend<T>(method: string, params: unknown[]): Promise<T> {
+  const token = await getBundlerToken();
+  try {
+    return await bundlerRpc<T>(method, params, token);
+  } catch (err) {
+    if ((err as { code?: number }).code === -32001) {
+      const fresh = await getBundlerToken(true);
+      return bundlerRpc<T>(method, params, fresh);
+    }
+    throw err;
+  }
 }
 
 async function waitForUserOpReceipt(userOpHash: string) {
@@ -111,7 +140,7 @@ export async function sendExecuteUserOp(params: {
   const userOpHash = await entryPoint.getUserOpHash(op);
   op.signature = await signer.signMessage(getBytes(userOpHash));
 
-  const returnedHash = await bundlerRpc<string>("eth_sendUserOperation", [serializeUserOp(op), lnet.entryPoint]);
+  const returnedHash = await bundlerSend<string>("eth_sendUserOperation", [serializeUserOp(op), lnet.entryPoint]);
   if (returnedHash.toLowerCase() !== userOpHash.toLowerCase()) {
     throw new Error(`Bundler returned ${returnedHash}, expected ${userOpHash}`);
   }
