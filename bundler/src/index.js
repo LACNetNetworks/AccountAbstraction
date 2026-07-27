@@ -4,6 +4,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const { ethers } = require("ethers");
+const { createAuthenticator } = require("./auth");
 require("dotenv").config({ path: path.join(__dirname, "..", "..", ".env") });
 
 const REPO_ROOT = path.join(__dirname, "..", "..");
@@ -81,6 +82,31 @@ function loadConfig() {
     bundleGasLimit: BigInt(process.env.BUNDLER_BUNDLE_GAS_LIMIT || fileConfig.bundleGasLimit || 8_000_000),
     enforceZeroGasFees: process.env.BUNDLER_ENFORCE_ZERO_GAS_FEES !== "false" && fileConfig.enforceZeroGasFees !== false,
     logLevel: process.env.BUNDLER_LOG_LEVEL || fileConfig.logLevel || "info",
+    auth: loadAuthConfig(fileConfig),
+  };
+}
+
+// Keycloak bearer-token auth. Auth turns on automatically once a Keycloak URL
+// and realm are configured, and can be forced on/off with BUNDLER_AUTH_ENABLED.
+function loadAuthConfig(fileConfig) {
+  const fileAuth = fileConfig.auth || {};
+  const keycloakUrl = (process.env.KEYCLOAK_URL || fileAuth.url || "").replace(/\/+$/, "");
+  const realm = process.env.KEYCLOAK_REALM || fileAuth.realm || "";
+  const issuer = keycloakUrl && realm ? `${keycloakUrl}/realms/${realm}` : process.env.KEYCLOAK_ISSUER || fileAuth.issuer || "";
+  const clientId = process.env.KEYCLOAK_CLIENT_ID || fileAuth.clientId || "";
+  const audience = process.env.BUNDLER_AUTH_AUDIENCE || fileAuth.audience || "";
+  const requiredRole = process.env.BUNDLER_REQUIRED_ROLE || fileAuth.requiredRole || "";
+
+  const explicit = process.env.BUNDLER_AUTH_ENABLED;
+  const enabled = explicit != null ? explicit !== "false" : Boolean(issuer);
+
+  return {
+    enabled,
+    issuer,
+    jwksUri: issuer ? `${issuer}/protocol/openid-connect/certs` : "",
+    clientId,
+    audience,
+    requiredRole,
   };
 }
 
@@ -92,6 +118,9 @@ function assertConfig(config) {
   if (!ethers.isAddress(config.beneficiary)) throw new Error("BUNDLER_BENEFICIARY must be an address");
   if (!["try", "required", "disabled"].includes(config.simulationMode)) {
     throw new Error("BUNDLER_SIMULATION must be 'try', 'required', or 'disabled'");
+  }
+  if (config.auth.enabled && !config.auth.issuer) {
+    throw new Error("Auth enabled but no Keycloak issuer: set KEYCLOAK_URL and KEYCLOAK_REALM (or BUNDLER_AUTH_ENABLED=false)");
   }
 }
 
@@ -414,9 +443,17 @@ class LnetBundler {
   }
 }
 
-async function handleRpc(bundler, payload) {
+// Methods that submit transactions to LNET and therefore require a valid
+// Keycloak bearer token. Everything else (read-only proxies, status, hash
+// lookups) stays open.
+const PROTECTED_METHODS = new Set(["eth_sendUserOperation", "lnet_bundleNow"]);
+
+async function handleRpc(bundler, payload, auth) {
   if (!payload || payload.jsonrpc !== "2.0" || typeof payload.method !== "string") {
     throw rpcError(-32600, "invalid JSON-RPC request");
+  }
+  if (auth && auth.enabled && PROTECTED_METHODS.has(payload.method) && !auth.ok) {
+    throw rpcError(-32001, `unauthorized: ${auth.error || "valid Keycloak bearer token required"}`);
   }
   const params = payload.params || [];
   switch (payload.method) {
@@ -453,12 +490,13 @@ async function handleRpc(bundler, payload) {
   }
 }
 
-function createServer(bundler) {
+function createServer(bundler, authenticator) {
+  const auth = authenticator || createAuthenticator(bundler.config.auth);
   return http.createServer(async (req, res) => {
     const corsHeaders = {
       "access-control-allow-origin": "*",
       "access-control-allow-methods": "GET,POST,OPTIONS",
-      "access-control-allow-headers": "content-type",
+      "access-control-allow-headers": "content-type,authorization",
     };
 
     if (req.method === "OPTIONS") {
@@ -494,10 +532,24 @@ function createServer(bundler) {
       }
 
       const requests = Array.isArray(payload) ? payload : [payload];
+
+      // Verify the bearer token once per HTTP request, and only when the batch
+      // actually contains a protected method — read-only calls stay tokenless.
+      const authContext = { enabled: auth.enabled, ok: false, claims: null, error: null };
+      const needsAuth = auth.enabled && requests.some((r) => r && PROTECTED_METHODS.has(r.method));
+      if (needsAuth) {
+        try {
+          authContext.claims = await auth.verifyRequest(req);
+          authContext.ok = true;
+        } catch (err) {
+          authContext.error = err.message;
+        }
+      }
+
       const responses = await Promise.all(
         requests.map(async (request) => {
           try {
-            const result = await handleRpc(bundler, request);
+            const result = await handleRpc(bundler, request, authContext);
             return { jsonrpc: "2.0", id: request.id ?? null, result };
           } catch (err) {
             return { jsonrpc: "2.0", id: request.id ?? null, error: formatRpcError(err) };
@@ -517,12 +569,13 @@ async function main() {
   const wallets = loadWallets(provider);
   if (config.beneficiary === ZERO_ADDRESS) config.beneficiary = wallets.relayer.address;
   const bundler = new LnetBundler(config, provider, wallets);
+  const authenticator = createAuthenticator(config.auth);
 
   setInterval(() => {
     bundler.bundleNow().catch((err) => log(config, "error", decodeKnownError(err)));
   }, config.autoBundleIntervalMs).unref();
 
-  const server = createServer(bundler);
+  const server = createServer(bundler, authenticator);
   server.on("error", (err) => {
     console.error(`bundler listen failed on ${config.host}:${config.port}:`, err.message);
     process.exit(1);
@@ -530,6 +583,12 @@ async function main() {
   server.listen(config.port, config.host, () => {
     console.log(`LNET bundler listening on http://${config.host}:${config.port}`);
     console.log(`mode=direct entryPoint=${config.entryPoint} relayer=${wallets.relayer.address}`);
+    if (authenticator.enabled) {
+      const role = config.auth.requiredRole ? ` requiredRole=${config.auth.requiredRole}` : "";
+      console.log(`auth=keycloak issuer=${config.auth.issuer}${role} protected=[${[...PROTECTED_METHODS].join(", ")}]`);
+    } else {
+      console.log("auth=disabled (set KEYCLOAK_URL + KEYCLOAK_REALM to enable JWT auth)");
+    }
   });
 }
 
@@ -546,4 +605,6 @@ module.exports = {
   serializeUserOp,
   loadConfig,
   createServer,
+  createAuthenticator,
+  PROTECTED_METHODS,
 };

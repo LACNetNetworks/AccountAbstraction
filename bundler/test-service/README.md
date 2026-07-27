@@ -36,6 +36,34 @@ BUNDLER_BUNDLE_GAS_LIMIT=8000000
 
 The service listens at `http://127.0.0.1:3000`.
 
+## Keycloak Token (for JWT auth)
+
+When the bundler runs with Keycloak auth enabled (`KEYCLOAK_URL` + `KEYCLOAK_REALM` set), write
+methods need a Bearer token. Fetch one from the token endpoint:
+
+```bash
+TOKEN=$(./bundler/test-service/get-token.sh)   # client_credentials grant by default
+# or: GRANT=password KC_USERNAME=... KC_PASSWORD=... ./bundler/test-service/get-token.sh
+```
+
+The `storage-via-bundler.cjs` test picks up `BUNDLER_TOKEN` automatically if you export it:
+
+```bash
+export BUNDLER_TOKEN="$(./bundler/test-service/get-token.sh)"
+./bundler/test-service/test-storage-via-bundler.sh
+```
+
+## Auth Checks
+
+With the bundler running under Keycloak auth, verify the token gate end-to-end:
+
+```bash
+./bundler/test-service/test-auth.sh
+```
+
+Asserts that reads work without a token, writes are rejected without/with a bogus token (`-32001`),
+and writes pass auth with a valid Keycloak token. Exits non-zero if any check fails.
+
 ## Basic Curl Test
 
 In another terminal:

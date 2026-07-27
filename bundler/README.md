@@ -61,10 +61,49 @@ Optional settings:
 | `BUNDLER_BUNDLE_GAS_LIMIT` | `8000000` | Gas limit for the direct `handleOps` transaction |
 | `BUNDLER_SIMULATION` | `try` | `try`, `required`, or `disabled` |
 | `BUNDLER_ENFORCE_ZERO_GAS_FEES` | true | Reject non-zero packed UserOp fees |
+| `KEYCLOAK_URL` | — | Keycloak base URL, e.g. `https://auth.l-net.io`. Enables JWT auth when set with the realm |
+| `KEYCLOAK_REALM` | — | Keycloak realm, e.g. `naas-realm` |
+| `KEYCLOAK_CLIENT_ID` | — | Expected token `azp` (authorized party); rejects tokens from other clients |
+| `BUNDLER_AUTH_ENABLED` | auto | `true`/`false` to force auth on/off (defaults on once URL+realm are set) |
+| `BUNDLER_AUTH_AUDIENCE` | — | Optional expected `aud` claim |
+| `BUNDLER_REQUIRED_ROLE` | — | Require this realm or client role on write methods, e.g. `bundler-writer` (empty = no role check) |
 
 `BUNDLER_SIMULATION=try` attempts `simulateValidation`. The deployed canonical EntryPoint may not
 expose simulation methods directly, so `try` accepts the op if simulation is unavailable. Use
 `required` only with an EntryPoint/simulation setup that supports it.
+
+## Authentication (Keycloak JWT)
+
+When `KEYCLOAK_URL` and `KEYCLOAK_REALM` are set, the bundler acts as an OAuth2 **resource server**:
+write methods require a valid Keycloak access token sent as `Authorization: Bearer <token>`.
+
+- **Validation is offline.** The token's RS256 signature is verified against the realm JWKS
+  (`<issuer>/protocol/openid-connect/certs`, cached), then `iss`, `exp`, optional `aud`, and — when
+  `KEYCLOAK_CLIENT_ID` is set — the `azp` claim are enforced. No per-request call to Keycloak.
+- **Optional role gate.** Set `BUNDLER_REQUIRED_ROLE` (e.g. `bundler-writer`) to require that role on
+  write methods. It is matched against the token's realm roles (`realm_access.roles`) and the
+  configured client's roles (`resource_access[KEYCLOAK_CLIENT_ID].roles`); a token without it is
+  rejected with `-32001 token missing required role '...'`.
+- **Only write methods are protected:** `eth_sendUserOperation` and `lnet_bundleNow`. Read-only
+  proxies, status, gas estimation, hash/receipt lookups and `/health` stay open so browser examples
+  can keep using the bundler as a CORS-friendly read RPC.
+- An unauthenticated write call returns JSON-RPC error `-32001 unauthorized: ...`.
+- Set `BUNDLER_AUTH_ENABLED=false` to disable auth entirely (e.g. for local-only runs).
+
+Client apps obtain the token from Keycloak using the **standard (authorization code) flow**. For a
+scripted test loop, `bundler/test-service/get-token.sh` fetches a token via the token endpoint:
+
+```bash
+TOKEN=$(./bundler/test-service/get-token.sh)          # client_credentials grant (default)
+curl -sS http://127.0.0.1:3000 \
+  -H 'content-type: application/json' \
+  -H "authorization: Bearer $TOKEN" \
+  -d '{"jsonrpc":"2.0","id":1,"method":"eth_sendUserOperation","params":[<userOp>, "<entryPoint>"]}'
+```
+
+The `client_credentials` grant needs *Service accounts roles* enabled on the client; `GRANT=password`
+(with `KC_USERNAME`/`KC_PASSWORD`) needs *Direct access grants*. The interactive authorization-code
+flow can't be completed with curl.
 
 ## JSON-RPC methods
 

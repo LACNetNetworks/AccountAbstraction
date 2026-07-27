@@ -68,10 +68,14 @@ function serializeUserOp(op) {
   };
 }
 
+const BUNDLER_TOKEN = process.env.BUNDLER_TOKEN || "";
+
 async function rpc(method, params = []) {
+  const headers = { "content-type": "application/json" };
+  if (BUNDLER_TOKEN) headers["authorization"] = `Bearer ${BUNDLER_TOKEN}`;
   const response = await fetch(BUNDLER_URL, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ jsonrpc: "2.0", id: Date.now(), method, params }),
   });
   const payload = await response.json();
