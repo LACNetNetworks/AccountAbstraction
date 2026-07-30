@@ -1,0 +1,6 @@
+# Local write log of the session backend (server/userop-log.mjs). Holds the
+# Privy user ids and accounts of whoever ran this example — never commit it.
+*.db
+*.db-journal
+*.db-wal
+*.db-shm

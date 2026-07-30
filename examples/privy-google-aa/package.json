@@ -8,7 +8,8 @@
     "server": "node --env-file=.env server/token-server.mjs",
     "dev:all": "node --env-file=.env server/token-server.mjs & SERVER_PID=$!; trap 'kill $SERVER_PID 2>/dev/null' EXIT INT TERM; vite --host 127.0.0.1 --port 5173",
     "build": "vite build",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "node --test server/*.test.mjs"
   },
   "dependencies": {
     "@privy-io/react-auth": "^2.24.0",

@@ -31,6 +31,47 @@ button:disabled {
   opacity: 0.55;
 }
 
+/* The Google popup and the bundler round-trip take seconds. A button that only
+   dims reads as broken, so a busy one keeps its full color and sweeps a
+   highlight across itself. Declared after :disabled — same specificity, so
+   order is what makes it win. */
+button.busy {
+  position: relative;
+  overflow: hidden;
+  opacity: 1;
+  cursor: progress;
+}
+
+button.busy::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(100deg, transparent 20%, rgba(255, 255, 255, 0.42) 50%, transparent 80%);
+  transform: translateX(-100%);
+  animation: shimmer 1.3s linear infinite;
+}
+
+@keyframes shimmer {
+  to {
+    transform: translateX(100%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Keep a liveness cue, drop the travel. */
+  button.busy::after {
+    background: rgba(255, 255, 255, 0.28);
+    transform: none;
+    animation: busy-pulse 1.8s ease-in-out infinite;
+  }
+
+  @keyframes busy-pulse {
+    50% {
+      opacity: 0.25;
+    }
+  }
+}
+
 button.secondary {
   background: #24322c;
 }
@@ -158,10 +199,12 @@ input {
   background: #fff8df;
 }
 
+/* The receipt JSON is long by nature, so it scrolls inside its own box: a cap in
+   vh keeps the panel from growing past the window and taking the page with it. */
 pre {
   overflow: auto;
   margin: 0;
-  max-height: 420px;
+  max-height: min(220px, 28vh);
   font-size: 12px;
   line-height: 1.5;
 }
@@ -170,6 +213,145 @@ pre {
   display: flex;
   flex-wrap: wrap;
   gap: 10px;
+}
+
+/* Sits right under the Result panel, which has no bottom margin of its own. */
+.history {
+  margin-top: 20px;
+}
+
+.history-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.history-head h2 {
+  margin: 0;
+}
+
+.history-note,
+.history-empty {
+  margin: 8px 0 14px;
+  color: #65726b;
+  font-size: 13px;
+}
+
+/* A long revert reason must scroll inside the panel, never widen the page. */
+.history-scroll {
+  overflow-x: auto;
+}
+
+.history-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 13px;
+}
+
+.history-table th {
+  padding: 8px 10px 8px 0;
+  border-bottom: 1px solid #d8ded8;
+  color: #65726b;
+  font-weight: 600;
+  text-align: left;
+  white-space: nowrap;
+}
+
+.history-table td {
+  padding: 9px 10px 9px 0;
+  border-bottom: 1px solid #edf0ec;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.history-table tr:last-child td {
+  border-bottom: none;
+}
+
+/* The value a reverted write asked for was never stored — do not let the column
+   read as a record of what the contract holds. */
+.history-void {
+  color: #a3312a;
+  text-decoration: line-through;
+}
+
+.hash-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* The global button is a 42px-tall filled control; a table needs the opposite. */
+.copy {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 5px;
+  padding: 0;
+  background: transparent;
+  color: #65726b;
+}
+
+.copy svg {
+  width: 13px;
+  height: 13px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.5;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.copy:hover {
+  background: #edf0ec;
+  color: #17211c;
+}
+
+/* Feedback has to be visible without moving anything: the row must not reflow. */
+.copy.copied {
+  color: #0f766e;
+}
+
+.copy.failed {
+  color: #a3312a;
+}
+
+.copy:focus-visible {
+  outline: 2px solid #0f766e;
+  outline-offset: 1px;
+}
+
+.tag {
+  display: inline-block;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  padding: 2px 9px;
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.tag.ok {
+  border-color: #86b89e;
+  background: #edf8f1;
+  color: #17211c;
+}
+
+.tag.error {
+  border-color: #e0a29e;
+  background: #fff1f0;
+  color: #a3312a;
+}
+
+.tag.pending {
+  border-color: #c9b46d;
+  background: #fff8df;
+  color: #51461a;
 }
 
 .modal-overlay {
