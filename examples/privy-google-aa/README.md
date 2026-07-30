@@ -20,10 +20,16 @@ The Google-created embedded wallet becomes the `owner` of the `LnetAccount` crea
 relayer private key.
 
 The bundler is protected with Keycloak JWT auth, so write calls (`eth_sendUserOperation`) need a
-Bearer token. A small **session backend** (`server/token-server.mjs`) logs into Keycloak server-side
-with the NAAS client secret and user credentials from `.env` — and the access token never reaches the
+Bearer token. A small **backend** (`server/api.mjs`) logs into Keycloak server-side with the NAAS
+client secret and user credentials from the environment — and the access token never reaches the
 frontend either: it is stored in an **HttpOnly cookie**, and the backend proxies write calls to the
 bundler, attaching `Authorization: Bearer` itself.
+
+**This is one service, not two.** The frontend and `/api` always share a single origin and a single
+port: in development the backend handler is mounted as Vite middleware (`server/vite-api.mjs`), and on
+Vercel the same handler is the catch-all function `api/[...path].js` next to the static build. There is
+no separate token server and no dev proxy — which is also what makes the `SameSite=Strict` first-party
+cookie below work identically in both places.
 
 ### Why the cookie implies a proxy
 
@@ -41,8 +47,8 @@ another origin. So the authenticated path becomes:
 Read-only RPC (`eth_call`, `eth_getUserOperationReceipt`, …) still goes straight to the bundler: it
 needs no token, so it needs no proxy.
 
-The cookie is a first-party cookie of the app's own origin because Vite proxies `/api` to the backend,
-and `SameSite=Strict` keeps it off cross-site requests. It carries the Keycloak token plus the Privy
+The cookie is a first-party cookie of the app's own origin because the same service serves both the
+page and `/api`, and `SameSite=Strict` keeps it off cross-site requests. It carries the Keycloak token plus the Privy
 subject, HMAC-signed so that pairing cannot be forged, and it has **no `Max-Age`** — a session cookie,
 kept in browser memory instead of written to the cookie database on disk. `/api/token` — the old
 endpoint that handed the token to the browser — is gone and answers `410`.
@@ -75,14 +81,13 @@ gas is free on LNET, so spam is the cheap attack.
 
 ## Quick Start
 
-The bundler is hosted at <https://bundler.l-net.io>, so nothing has to run locally for it. The
-example only needs **two local services**: the session backend (`:8787`) and the Vite dev server
-(`:5173`). One command starts both:
+The bundler is hosted at <https://bundler.l-net.io>, so nothing has to run locally for it. The example
+itself is **one service on one port** — the `/api` backend runs inside the dev server:
 
 ```bash
 cd examples/privy-google-aa
 npm install
-npm run dev:all      # session backend (:8787) + Vite (:5173)
+npm run dev          # app + /api on :5173
 ```
 
 Then open <http://127.0.0.1:5173>.
@@ -203,8 +208,8 @@ VITE_FACTORY_ADDRESS=0x5589A0E344688976e473FD56BAe94411d9d56f67
 
 ### Session backend (Keycloak)
 
-The session backend needs these `.env` values (no `VITE_` prefix, so Vite never ships them to the
-browser):
+The backend needs these values (no `VITE_` prefix, so Vite never ships them to the browser). Locally
+they come from `.env`; deployed, from the platform's environment variables:
 
 ```bash
 KEYCLOAK_URL=https://auth.l-net.io
@@ -213,14 +218,15 @@ KEYCLOAK_CLIENT_ID=naas-client
 KEYCLOAK_CLIENT_SECRET=<naas client secret>
 NAAS_USERNAME=<naas user>
 NAAS_PASSWORD=<naas password>
-TOKEN_SERVER_HOST=127.0.0.1
-TOKEN_SERVER_PORT=8787
 BUNDLER_URL=https://bundler.l-net.io   # where /api/bundler forwards writes
 ```
 
 The backend does a Keycloak password-grant login, sets the access token as an HttpOnly cookie, and
-proxies bundler writes; the Vite dev server proxies `/api` -> `http://127.0.0.1:8787`. Keep
-`BUNDLER_URL` in sync with `VITE_BUNDLER_URL` so reads and writes hit the same bundler.
+proxies bundler writes. Keep `BUNDLER_URL` in sync with `VITE_BUNDLER_URL` so reads and writes hit the
+same bundler.
+
+The Vite plugin loads the whole `.env` into `process.env` before importing the handler, so one file
+still drives both sides in dev — and only `VITE_*` values reach the browser bundle, exactly as before.
 
 It also needs the Privy **app id** to verify user tokens. It falls back to `VITE_PRIVY_APP_ID`, so
 normally there is nothing extra to set; the Privy *app secret* is not used anywhere.
@@ -245,19 +251,19 @@ is rejected with `rejected by policy: target 0x… is not allowed` until you add
 set `ALLOWED_CALL_TARGETS=*`. If **neither** variable is set, any target is accepted and the backend
 warns about it at startup — the inner-call allowlist still applies in that case.
 
-Optional cookie knobs (defaults are right for local dev):
+Optional cookie knobs (defaults are right for both local dev and a deployment):
 
 ```bash
 SESSION_COOKIE_NAME=naas_session
 SESSION_COOKIE_PATH=/api
 SESSION_COOKIE_SAMESITE=Strict   # None (+ Secure + HTTPS) only for a cross-origin frontend
-SESSION_COOKIE_SECURE=true       # implied when SameSite=None
-SESSION_SECRET=                  # fixes cookie signing across restarts
+SESSION_COOKIE_SECURE=true       # implied when SameSite=None, and when deployed (HTTPS)
+SESSION_SECRET=                  # fixes cookie signing across restarts / serverless instances
 ```
 
-If the frontend does not go through the Vite proxy — `VITE_API_BASE` set to an absolute URL — the
-requests become cross-origin, so you also need `TOKEN_ALLOWED_ORIGINS`, `SESSION_COOKIE_SAMESITE=None`
-and HTTPS on both sides. Staying on the proxy avoids all of that.
+If the frontend does not use the same origin — `VITE_API_BASE` set to an absolute URL — the requests
+become cross-origin, so you also need `TOKEN_ALLOWED_ORIGINS`, `SESSION_COOKIE_SAMESITE=None` and HTTPS
+on both sides. Keeping frontend and API in one service avoids all of that.
 
 `VITE_READ_RPC_URL` should stay pointed at the bundler for browser testing. The bundler proxies
 read-only JSON-RPC methods like `eth_call`, `eth_getCode`, `eth_blockNumber`, `eth_getBalance`, and
@@ -268,41 +274,31 @@ directly unless that RPC explicitly allows your browser origin.
 
 ## Run
 
-From the example folder, start both the session backend and the Vite dev server:
+From the example folder, one command starts everything — the app and its `/api` backend share the dev
+server:
 
 ```bash
 npm install
-npm run dev:all      # session backend (:8787) + Vite (:5173) together
+npm run dev          # app + /api on :5173
 ```
 
-Or run them in two terminals:
-
-```bash
-npm run server       # terminal 1: session backend on :8787
-npm run dev          # terminal 2: Vite on :5173
-```
-
-`dev:all` traps `EXIT INT TERM` and kills the backgrounded session backend, so `Ctrl+C` — or Vite
-exiting on its own — takes both services down instead of leaving `:8787` orphaned. If port `8787`
-ever stays busy anyway, kill the leftover process:
-
-```bash
-lsof -ti :8787 | xargs kill
-```
+The backend prints its configuration under an `api` prefix in the same output, so a missing env var or
+a wide-open policy is visible right there. To serve the production build locally instead (same single
+port, `/api` included), run `npm run build && npm run preview`.
 
 Sanity-check the backend:
 
 ```bash
-# Reports the Keycloak issuer, the bundler, the Privy app id and the active policy
-curl -sS http://127.0.0.1:8787/api/health
+# Reports the mode, the Keycloak issuer, the bundler, the Privy app id and the active policy
+curl -sS http://127.0.0.1:5173/api/health
 
 # Creating a session needs a real Privy login, so curl gets a 401 here — that is
 # the identity gate working, not a misconfiguration:
-curl -sS -X POST http://127.0.0.1:8787/api/session
+curl -sS -X POST http://127.0.0.1:5173/api/session
 # -> {"error":"missing Privy access token — log in with Google first"}
 
 # Same for the proxy without a cookie:
-curl -sS -X POST http://127.0.0.1:8787/api/bundler \
+curl -sS -X POST http://127.0.0.1:5173/api/bundler \
   -H 'content-type: application/json' -d '{"jsonrpc":"2.0","id":1,"method":"eth_chainId","params":[]}'
 # -> {"error":"no session — POST /api/session first"}
 ```
@@ -331,9 +327,54 @@ Expected result:
 - The UI shows the UserOp hash.
 - The bundler returns a receipt with the `handleOps` transaction hash.
 
+## Deploy (Vercel)
+
+The single-service layout is what makes this deployable as one Vercel project: the Vite build is served
+as static files, and `api/[...path].js` — the same `server/api.mjs` handler used in dev — answers every
+`/api/*` route from the same domain. No second port, no proxy, no CORS.
+
+```bash
+npm i -g vercel
+cd examples/privy-google-aa
+vercel link          # set the project Root Directory to examples/privy-google-aa
+vercel env pull      # optional: check what the project will run with
+vercel --prod
+```
+
+Set the server-side variables in the Vercel project (Settings -> Environment Variables) — `.env` is not
+uploaded:
+
+```text
+KEYCLOAK_CLIENT_SECRET, NAAS_USERNAME, NAAS_PASSWORD, BUNDLER_URL,
+SESSION_SECRET, ALLOWED_CALL_TARGETS, ALLOWED_INNER_CALLS
+VITE_PRIVY_APP_ID, VITE_BUNDLER_URL, VITE_READ_RPC_URL,
+VITE_ENTRYPOINT_ADDRESS, VITE_FACTORY_ADDRESS, VITE_STORAGE_ADDRESS
+```
+
+`VITE_*` values are baked into the bundle at build time, so changing one needs a redeploy; the others
+are read per request. Then add the deployment URL (and any custom domain) to the Privy dashboard's
+allowed origins, or Google login will be refused there.
+
+Three defaults flip automatically because Vercel sets `VERCEL=1` (`DEPLOYED=true` forces the same on
+another host):
+
+- **Cookie `Secure`** is added — the origin is HTTPS.
+- **The loopback `Host` check is skipped**, since the platform router decides which domains reach the
+  deployment (preview URLs and custom domains cannot be enumerated up front). CSRF protection then
+  rests on `Sec-Fetch-Site` plus an `Origin`-vs-host comparison, which is what same-origin serving buys.
+- **The write log moves to `/tmp/userops.db`**, the only writable path on a serverless instance. It is
+  per-instance and wiped on cold start, so `/api/history` there shows recent writes best-effort
+  (`ephemeral: true` in the response) rather than a durable audit trail — point `USEROP_LOG_DB` at real
+  storage, or swap `server/userop-log.mjs` for a hosted DB, if the trail must survive.
+
+`SESSION_SECRET` matters more here than locally: each instance otherwise signs cookies with its own
+random key.
+
 ## Notes
 
 - The browser never sends a raw LNET transaction.
+- Frontend and backend are one service: `/api` is Vite middleware in dev and a Vercel function in
+  production, both importing `server/api.mjs`.
 - The bundler access token is never in JS reach: no `localStorage`, no `sessionStorage`, no in-memory
   copy — only the HttpOnly cookie, which `document.cookie` cannot see.
 - The bundler relayer still needs direct raw-tx permission on LNET.
@@ -393,13 +434,14 @@ button is visible), and that `VITE_PRIVY_APP_ID` matches the app whose tokens th
 
 The session cookie is not reaching the backend. Check, in order:
 
-- You are calling the app through the Vite dev server (`http://127.0.0.1:5173`), not the backend port
-  directly — otherwise the request is cross-origin and `SameSite=Strict` drops the cookie.
-- `VITE_API_BASE` is unset (or `/api`). An absolute URL needs `TOKEN_ALLOWED_ORIGINS` +
-  `SESSION_COOKIE_SAMESITE=None` + HTTPS.
+- `VITE_API_BASE` is unset (or `/api`), so the calls stay on the app's own origin. An absolute URL makes
+  them cross-origin, which needs `TOKEN_ALLOWED_ORIGINS` + `SESSION_COOKIE_SAMESITE=None` + HTTPS.
 - You did not switch between `127.0.0.1` and `localhost` mid-session: they are different cookie hosts.
 - The backend log has no `access token is N bytes — close to the 4KB cookie limit` warning; past ~4KB
   the browser silently drops the cookie.
+- Deployed: `SESSION_SECRET` is set. Without it every serverless instance signs cookies with its own
+  random key, so a cold start invalidates sessions issued by the previous one. The frontend recovers by
+  re-creating the session, but repeated 401s on the first write of every visit point here.
 
 ### `Failed to fetch`
 

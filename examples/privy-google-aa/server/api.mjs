@@ -1,5 +1,14 @@
 // Session backend + policy-gated bundler proxy for the Privy AA example.
 //
+// This module is transport-agnostic: it exports one `handleApi(req, res)` request
+// handler (plain Node http shapes) and never opens a port of its own. That is what
+// lets a SINGLE service serve both the app and its API:
+//
+//   dev/preview -> mounted as Vite middleware (server/vite-api.mjs), so `/api/*`
+//                  and the frontend share one origin and one port.
+//   Vercel      -> mounted as the catch-all function `api/[...path].js`, so `/api/*`
+//                  and the static build share one deployment and one domain.
+//
 // The browser must reach a (JWT-protected) bundler, but neither the NAAS client
 // secret nor the user password may live in the browser — and neither may the
 // access token itself.
@@ -18,16 +27,17 @@
 // The proxy is not optional: the bundler lives on another origin and expects a
 // Bearer header, and an HttpOnly cookie is unreadable to fetch() on the page.
 // Because the proxy carries privileged authority, it validates rather than relays.
-//
-// Run with:  node --env-file=.env server/token-server.mjs
-// (the Vite dev server proxies /api -> this server; see vite.config.ts)
 
-import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { AuthError, createPrivyVerifier } from "./privy-auth.mjs";
 import { createSessionCodec } from "./session-cookie.mjs";
 import { PolicyError, createUserOpPolicy } from "./userop-policy.mjs";
 import { createUserOpLog, outcomeFromReceipt } from "./userop-log.mjs";
+
+// True on Vercel (and any platform that sets it): the process sits behind the
+// platform's router on a real domain over HTTPS, not on loopback. It flips three
+// defaults — Host allowlisting, cookie Secure, and where the write log lives.
+const DEPLOYED = Boolean(process.env.VERCEL || process.env.DEPLOYED === "true");
 
 const {
   KEYCLOAK_URL = "https://auth.l-net.io",
@@ -36,22 +46,23 @@ const {
   KEYCLOAK_CLIENT_SECRET = "",
   NAAS_USERNAME = "",
   NAAS_PASSWORD = "",
-  TOKEN_SERVER_HOST = "127.0.0.1",
-  TOKEN_SERVER_PORT = "8787",
   // Where /api/bundler forwards writes. Keep in sync with VITE_BUNDLER_URL.
   BUNDLER_URL = "https://bundler.l-net.io",
-  // Origins allowed to use the session cross-origin. Empty by default: the Vite
-  // proxy makes the calls same-origin, so no CORS is needed at all.
+  // Extra origins allowed to use the session cross-origin. Empty by default: the
+  // frontend is served by this same service, so its calls are same-origin and
+  // need no CORS at all.
   TOKEN_ALLOWED_ORIGINS = "",
-  // Cookie tuning. SameSite=Strict is the safe default and works for the
-  // same-origin (Vite proxy) setup; a cross-origin frontend needs
-  // SameSite=None + Secure, which in turn requires HTTPS on both sides.
+  // Cookie tuning. Same-origin means SameSite=Strict works everywhere; Secure is
+  // implied once deployed (HTTPS). A cross-origin frontend needs
+  // SameSite=None + Secure, which requires HTTPS on both sides.
   SESSION_COOKIE_NAME = "naas_session",
   SESSION_COOKIE_PATH = "/api",
   SESSION_COOKIE_SAMESITE = "Strict",
   SESSION_COOKIE_SECURE = "",
   // Optional: fixes cookie signing across restarts. Random per boot otherwise,
-  // which just means old cookies stop validating after a restart.
+  // which just means old cookies stop validating after a restart. On serverless
+  // each instance boots its own key, so set this to keep sessions working across
+  // instances — otherwise every cold start forces one extra POST /api/session.
   SESSION_SECRET = "",
   // Privy identity. The app id is public (the browser has it too); no app secret
   // is needed because Privy publishes its signing keys as a JWKS.
@@ -70,8 +81,10 @@ const {
   // Function signatures the inner call may use; `*` allows any.
   ALLOWED_INNER_CALLS = "set(uint256)",
   // SQLite file holding the write log. Relative paths resolve from the server
-  // directory, not the shell's cwd, so `npm run server` behaves the same anywhere.
-  USEROP_LOG_DB = "userops.db",
+  // directory, not the shell's cwd, so the log lands in the same place wherever
+  // the dev server is started from. On a serverless platform the filesystem is
+  // read-only except /tmp, so the default moves there — see HISTORY_DB_PATH.
+  USEROP_LOG_DB = "",
   // How many entries GET /api/history returns by default.
   USEROP_LOG_LIMIT = "10",
 } = process.env;
@@ -87,8 +100,10 @@ const ALLOWED_ORIGINS = new Set(list(TOKEN_ALLOWED_ORIGINS));
 const TOKEN_URL = `${KEYCLOAK_URL.replace(/\/+$/, "")}/realms/${KEYCLOAK_REALM}/protocol/openid-connect/token`;
 
 const COOKIE_SAMESITE = SESSION_COOKIE_SAMESITE || "Strict";
-// SameSite=None is meaningless (and rejected by browsers) without Secure.
-const COOKIE_SECURE = SESSION_COOKIE_SECURE === "true" || COOKIE_SAMESITE.toLowerCase() === "none";
+// SameSite=None is meaningless (and rejected by browsers) without Secure; a
+// deployed origin is HTTPS, so Secure is the default there.
+const COOKIE_SECURE =
+  SESSION_COOKIE_SECURE === "true" || COOKIE_SAMESITE.toLowerCase() === "none" || (DEPLOYED && SESSION_COOKIE_SECURE !== "false");
 
 function list(value) {
   return (value || "")
@@ -116,15 +131,22 @@ const session = createSessionCodec({
 });
 
 const HISTORY_LIMIT = Math.max(1, Number(USEROP_LOG_LIMIT) || 10);
-const HISTORY_DB_PATH = USEROP_LOG_DB.startsWith("/")
-  ? USEROP_LOG_DB
-  : fileURLToPath(new URL(USEROP_LOG_DB, import.meta.url));
-const userOpLog = createUserOpLog({ path: HISTORY_DB_PATH });
+const HISTORY_DB_PATH = historyDbPath();
 
-// Built lazily so a missing/invalid address fails on the first request with a
-// readable error instead of crashing the process at import time.
+function historyDbPath() {
+  // Only /tmp is writable on a serverless instance, and it is per-instance and
+  // wiped on cold start: the log is a convenience there, not durable storage.
+  if (!USEROP_LOG_DB) return DEPLOYED ? "/tmp/userops.db" : fileURLToPath(new URL("userops.db", import.meta.url));
+  return USEROP_LOG_DB.startsWith("/") ? USEROP_LOG_DB : fileURLToPath(new URL(USEROP_LOG_DB, import.meta.url));
+}
+
+// Built lazily so a missing/invalid address or an unavailable node:sqlite fails on
+// the first request with a readable error instead of crashing at import time —
+// which on serverless would take the whole function down, including the writes
+// that do not need the log at all.
 let privy = null;
 let policy = null;
+let log = null;
 
 function privyVerifier() {
   if (!privy) privy = createPrivyVerifier({ appId: privyAppId, jwksUrl: PRIVY_JWKS_URL || undefined });
@@ -143,10 +165,37 @@ function writePolicy() {
   return policy;
 }
 
+// A write must not fail because the audit log cannot open. node:sqlite needs
+// Node >= 22.5 and a writable path; if either is missing, degrade to a log that
+// records nothing and says so, rather than 500-ing every UserOperation.
+function userOpLog() {
+  if (!log) {
+    try {
+      log = createUserOpLog({ path: HISTORY_DB_PATH });
+    } catch (err) {
+      console.warn(`WARNING: write log disabled (${HISTORY_DB_PATH}): ${err.message}`);
+      log = disabledLog(err.message);
+    }
+  }
+  return log;
+}
+
+function disabledLog(reason) {
+  return {
+    path: HISTORY_DB_PATH,
+    unavailable: reason,
+    record: () => null,
+    pending: () => [],
+    settle: () => {},
+    recent: () => [],
+  };
+}
+
 // --- Keycloak ----------------------------------------------------------------
 
 // Cache the Keycloak token in memory so repeated logins (page reloads, new tabs,
-// cookie expiry) do not hammer Keycloak for a token that is still valid.
+// cookie expiry) do not hammer Keycloak for a token that is still valid. The
+// cache is per process, so a serverless instance warms up its own.
 let cache = { accessToken: null, expiresAt: 0, expiresIn: 0 };
 
 async function fetchToken() {
@@ -209,18 +258,33 @@ function tokenExpiryMs(token) {
 
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "localhost", "::1", "[::1]"]);
 
+// The authority the browser actually addressed. A platform router rewrites `Host`
+// to its own internal value on some setups and puts the public one in
+// `X-Forwarded-Host`, so that header is what the Origin must be compared against
+// — but only when we know a trusted proxy is in front (deployed), since any
+// client can invent the header otherwise.
+function requestHost(req) {
+  const forwarded = DEPLOYED ? String(req.headers["x-forwarded-host"] || "").split(",")[0].trim() : "";
+  return forwarded || req.headers.host;
+}
+
 function hostnameOf(hostHeader) {
   if (!hostHeader) return null;
-  // IPv6 authorities are bracketed: [::1]:8787
+  // IPv6 authorities are bracketed: [::1]:5173
   if (hostHeader.startsWith("[")) return hostHeader.slice(0, hostHeader.indexOf("]") + 1);
   return hostHeader.split(":")[0];
 }
 
-// Blocks DNS rebinding: a page on evil.com whose DNS resolves to 127.0.0.1 still
-// sends `Host: evil.com`, and its requests count as same-origin to itself, so
-// Sec-Fetch-Site would happily say "same-origin". The Host is the reliable signal.
+// Blocks DNS rebinding against a local dev server: a page on evil.com whose DNS
+// resolves to 127.0.0.1 still sends `Host: evil.com`, and its requests count as
+// same-origin to itself, so both Sec-Fetch-Site and an Origin/Host comparison
+// would happily agree. The Host is the reliable signal — but only when we know
+// which hosts are legitimate. Deployed, the platform router decides that (the
+// domain set can include preview URLs and custom domains we cannot enumerate),
+// so the check applies to local runs, where the answer is exactly "loopback".
 function hostAllowed(req) {
-  return LOOPBACK_HOSTNAMES.has(hostnameOf(req.headers.host));
+  if (DEPLOYED) return true;
+  return LOOPBACK_HOSTNAMES.has(hostnameOf(requestHost(req)));
 }
 
 function originAllowed(req) {
@@ -228,7 +292,11 @@ function originAllowed(req) {
   if (!origin) return true; // curl/scripts: no cookie jar, so nothing to ride on
   if (ALLOWED_ORIGINS.has(origin)) return true;
   try {
-    return LOOPBACK_HOSTNAMES.has(new URL(origin).hostname);
+    const { hostname, host } = new URL(origin);
+    // The frontend is served by this same service, so a legitimate browser call
+    // is same-origin: its Origin authority equals the host it was sent to.
+    if (host === requestHost(req)) return true;
+    return !DEPLOYED && LOOPBACK_HOSTNAMES.has(hostname);
   } catch {
     return false;
   }
@@ -268,6 +336,15 @@ function json(res, status, payload, req, extraHeaders) {
 const MAX_BODY_BYTES = 1_000_000;
 
 function readBody(req) {
+  // Serverless adapters (including Vercel's) parse and attach the body before
+  // the handler runs, which leaves the stream drained — reading it again would
+  // hang or come back empty. Reuse what they parsed, and re-serialize the object
+  // form so the bytes forwarded to the bundler stay valid JSON.
+  if (req.body !== undefined && req.body !== null) {
+    if (Buffer.isBuffer(req.body)) return Promise.resolve(req.body);
+    if (typeof req.body === "string") return Promise.resolve(Buffer.from(req.body));
+    return Promise.resolve(Buffer.from(JSON.stringify(req.body)));
+  }
   return new Promise((resolve, reject) => {
     let size = 0;
     const chunks = [];
@@ -391,7 +468,7 @@ async function handleBundler(req, res) {
       // Rejected writes never reach the chain, so this log is the only record
       // they ever leave. The addresses come from an unvalidated body — they are
       // logged as claimed, not as verified facts.
-      userOpLog.record({
+      userOpLog().record({
         userSub: current.sub,
         status: "rejected",
         method: request?.method,
@@ -413,7 +490,7 @@ async function handleBundler(req, res) {
       body,
     });
   } catch (err) {
-    userOpLog.record({
+    userOpLog().record({
       userSub: current.sub,
       status: "failed",
       method: checked.method,
@@ -431,7 +508,7 @@ async function handleBundler(req, res) {
 
   const text = await upstream.text();
   const answer = parseJson(text);
-  userOpLog.record({
+  userOpLog().record({
     userSub: current.sub,
     // The bundler answering 200 with a JSON-RPC error is still a rejected write.
     status: answer?.error || !upstream.ok ? "failed" : "sent",
@@ -461,19 +538,21 @@ async function handleBundler(req, res) {
 // itself rather than trusting the page to report how its own write turned out.
 async function settlePending(limit) {
   await Promise.all(
-    userOpLog.pending(limit).map(async ({ id, userOpHash }) => {
-      try {
-        const response = await fetch(BUNDLER_URL, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getUserOperationReceipt", params: [userOpHash] }),
-        });
-        const outcome = outcomeFromReceipt(parseJson(await response.text())?.result, userOpHash);
-        if (outcome) userOpLog.settle(id, outcome);
-      } catch {
-        // Still pending as far as we know; the next read tries again.
-      }
-    }),
+    userOpLog()
+      .pending(limit)
+      .map(async ({ id, userOpHash }) => {
+        try {
+          const response = await fetch(BUNDLER_URL, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_getUserOperationReceipt", params: [userOpHash] }),
+          });
+          const outcome = outcomeFromReceipt(parseJson(await response.text())?.result, userOpHash);
+          if (outcome) userOpLog().settle(id, outcome);
+        } catch {
+          // Still pending as far as we know; the next read tries again.
+        }
+      }),
   );
 }
 
@@ -493,10 +572,42 @@ async function handleHistory(req, res) {
   const limit = Math.min(100, Math.max(1, Number.isFinite(requested) && requested > 0 ? requested : HISTORY_LIMIT));
 
   await settlePending(limit);
-  json(res, 200, { entries: userOpLog.recent(limit), db: HISTORY_DB_PATH }, req);
+  const store = userOpLog();
+  json(
+    res,
+    200,
+    {
+      entries: store.recent(limit),
+      db: HISTORY_DB_PATH,
+      // Set when the log could not be opened: the writes still go through, but
+      // this list will stay empty, and the frontend should say why.
+      unavailable: store.unavailable ?? null,
+      // /tmp on serverless is per-instance and wiped on cold start.
+      ephemeral: DEPLOYED && HISTORY_DB_PATH.startsWith("/tmp/"),
+    },
+    req,
+  );
 }
 
-const server = createServer(async (req, res) => {
+/**
+ * Serves `/api/*`. Plain Node `(req, res)` shapes, so it works as Vite middleware,
+ * as a Vercel function, and inside a bare `http.createServer`.
+ *
+ * @param {import("node:http").IncomingMessage} req
+ * @param {import("node:http").ServerResponse} res
+ * @param {(err?: unknown) => void} [next] called for paths this backend does not
+ *        own, so a host (Vite) can fall through to serving the frontend. Without
+ *        it, unknown paths answer 404.
+ */
+export async function handleApi(req, res, next) {
+  const path = (req.url || "").split("?")[0];
+
+  if (!path.startsWith("/api")) {
+    if (next) return next();
+    json(res, 404, { error: "not found" }, req);
+    return;
+  }
+
   if (!hostAllowed(req)) {
     json(res, 421, { error: "unexpected Host — this server only answers on loopback" });
     return;
@@ -512,19 +623,19 @@ const server = createServer(async (req, res) => {
     return;
   }
 
-  const path = (req.url || "").split("?")[0];
-
   if (req.method === "GET" && path === "/api/health") {
     json(
       res,
       200,
       {
         ok: true,
+        mode: DEPLOYED ? "deployed" : "local",
         issuer: `${KEYCLOAK_URL.replace(/\/+$/, "")}/realms/${KEYCLOAK_REALM}`,
         user: NAAS_USERNAME || null,
         bundler: BUNDLER_URL,
         privy_app_id: privyAppId || null,
         policy: entryPoint ? writePolicy().describe() : null,
+        missing_env: missingConfig(),
       },
       req,
     );
@@ -554,41 +665,59 @@ const server = createServer(async (req, res) => {
   }
 
   json(res, 404, { error: "not found" }, req);
-});
+}
 
-server.listen(Number(TOKEN_SERVER_PORT), TOKEN_SERVER_HOST, () => {
-  const cfgMissing = missingConfig();
-  console.log(`session backend listening on http://${TOKEN_SERVER_HOST}:${TOKEN_SERVER_PORT}`);
-  console.log(`keycloak=${TOKEN_URL} client=${KEYCLOAK_CLIENT_ID} user=${NAAS_USERNAME || "(unset)"}`);
-  console.log(`bundler=${BUNDLER_URL}`);
-  console.log(`privy app=${privyAppId || "(unset)"} jwks=${privyAppId ? privyVerifier().jwksUrl : "(n/a)"}`);
+/** Errors must not leave a request hanging; the caller decides where they go. */
+export function apiHandler({ onError } = {}) {
+  return (req, res, next) =>
+    handleApi(req, res, next).catch((err) => {
+      if (onError) onError(err);
+      else console.error(`api error: ${err?.stack || err}`);
+      if (!res.headersSent) json(res, 500, { error: "internal error" }, req);
+      else res.end();
+    });
+}
+
+/** One-line summary of how this backend is configured, for a boot log. */
+export function describeApi() {
+  const lines = [
+    `mode=${DEPLOYED ? "deployed (platform-routed, HTTPS)" : "local"}`,
+    `keycloak=${TOKEN_URL} client=${KEYCLOAK_CLIENT_ID} user=${NAAS_USERNAME || "(unset)"}`,
+    `bundler=${BUNDLER_URL}`,
+    `privy app=${privyAppId || "(unset)"} jwks=${privyAppId ? privyVerifier().jwksUrl : "(n/a)"}`,
+  ];
   if (entryPoint) {
     const described = writePolicy().describe();
-    console.log(
+    lines.push(
       `policy methods=${described.methods.join(",")} entryPoint=${described.entryPoint} targets=${
         described.targets === "*" ? "*" : described.targets.join(",") || "(none)"
       } innerCalls=${described.innerCalls === "*" ? "*" : described.innerCalls.join(",")}`,
     );
   }
-  console.log(
+  lines.push(
     `cookie=${SESSION_COOKIE_NAME} HttpOnly Path=${SESSION_COOKIE_PATH} SameSite=${COOKIE_SAMESITE}${COOKIE_SECURE ? " Secure" : ""} (session cookie — not stored on disk)`,
   );
-  console.log(`cors=${ALLOWED_ORIGINS.size ? [...ALLOWED_ORIGINS].join(",") : "(none — same-origin via the Vite proxy)"}`);
-  console.log(`write log=${HISTORY_DB_PATH} (GET /api/history returns the last ${HISTORY_LIMIT})`);
-  if (!LOOPBACK_HOSTNAMES.has(TOKEN_SERVER_HOST)) {
-    console.warn(`WARNING: TOKEN_SERVER_HOST=${TOKEN_SERVER_HOST} is not loopback — this server must not be exposed`);
-  }
+  lines.push(`cors=${ALLOWED_ORIGINS.size ? [...ALLOWED_ORIGINS].join(",") : "(none — the frontend is same-origin)"}`);
+  lines.push(`write log=${HISTORY_DB_PATH} (GET /api/history returns the last ${HISTORY_LIMIT})`);
+
+  const warnings = [];
   if (ALLOWED_ORIGINS.size && COOKIE_SAMESITE.toLowerCase() !== "none") {
-    console.warn(`WARNING: TOKEN_ALLOWED_ORIGINS is set but SameSite=${COOKIE_SAMESITE} — browsers will not send the session cookie cross-site (needs SESSION_COOKIE_SAMESITE=None + HTTPS)`);
+    warnings.push(
+      `TOKEN_ALLOWED_ORIGINS is set but SameSite=${COOKIE_SAMESITE} — browsers will not send the session cookie cross-site (needs SESSION_COOKIE_SAMESITE=None + HTTPS)`,
+    );
   }
   if (!allowedTargets.length) {
-    console.warn(
-      "WARNING: no ALLOWED_CALL_TARGETS and no VITE_STORAGE_ADDRESS — the policy accepts a UserOp calling ANY contract (the inner-call allowlist still applies). Set ALLOWED_CALL_TARGETS to lock this down.",
+    warnings.push(
+      "no ALLOWED_CALL_TARGETS and no VITE_STORAGE_ADDRESS — the policy accepts a UserOp calling ANY contract (the inner-call allowlist still applies). Set ALLOWED_CALL_TARGETS to lock this down.",
     );
   } else if (allowedTargets.includes("*")) {
-    console.warn("WARNING: ALLOWED_CALL_TARGETS=* — the policy will accept a UserOp calling any contract");
+    warnings.push("ALLOWED_CALL_TARGETS=* — the policy will accept a UserOp calling any contract");
   }
-  if (cfgMissing.length) {
-    console.warn(`WARNING: missing env (${cfgMissing.join(", ")}) — POST /api/session will return 500 until set`);
+  if (DEPLOYED && !SESSION_SECRET) {
+    warnings.push("no SESSION_SECRET — each serverless instance signs cookies with its own key, so sessions do not survive a cold start");
   }
-});
+  const cfgMissing = missingConfig();
+  if (cfgMissing.length) warnings.push(`missing env (${cfgMissing.join(", ")}) — POST /api/session will return 500 until set`);
+
+  return { lines, warnings };
+}

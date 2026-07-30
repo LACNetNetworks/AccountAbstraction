@@ -1,8 +1,8 @@
 // Session handling for the JWT-protected bundler.
 //
 // The access token is NOT fetched into the page any more: the backend
-// (server/token-server.mjs) keeps it in an HttpOnly cookie, so nothing here can
-// read it — and neither can injected script. This module only:
+// (server/api.mjs, served from this same origin) keeps it in an HttpOnly cookie,
+// so nothing here can read it — and neither can injected script. This module only:
 //
 //   1. proves who is asking, by sending the Privy access token of the logged-in
 //      user to POST /api/session, which is what mints the cookie, and
@@ -23,16 +23,15 @@ export const BUNDLER_PROXY_ENDPOINT = `${API_BASE}/bundler`;
 export const HISTORY_ENDPOINT = `${API_BASE}/history`;
 
 // Cookies only ride along cross-origin with `include`. Same-origin (the default:
-// Vite proxies /api to the backend) needs nothing special, and `same-origin`
+// /api is served by this same app) needs nothing special, and `same-origin`
 // keeps the credentials from leaking if the base is ever repointed by mistake.
 export const CREDENTIALS: RequestCredentials = /^https?:\/\//i.test(import.meta.env.VITE_API_BASE || "")
   ? "include"
   : "same-origin";
 
-// The backend not running is the most common failure here, and it does not
-// surface as a clean error: Vite's proxy turns ECONNREFUSED into a text/plain
-// 500, so the status alone says nothing useful. Name the fix instead.
-const BACKEND_DOWN = `session backend not reachable at ${API_BASE} — start it with \`npm run server\` (or run both with \`npm run dev:all\`)`;
+// A non-JSON answer from /api is the confusing failure here: the status alone
+// says nothing useful, so name what is actually wrong instead.
+const BACKEND_DOWN = `session backend not reachable at ${API_BASE} — it is part of this same app (server/api.mjs, mounted by Vite in dev and deployed as api/[...path].js), so check the dev server output`;
 
 // Only the expiry hint is cached — there is no token to cache. It saves a
 // round trip per write while the cookie is known to still be good.
@@ -69,9 +68,9 @@ async function createSession(): Promise<void> {
     throw new Error(BACKEND_DOWN);
   }
 
-  // token-server.mjs always answers with JSON, including on error. A non-JSON
-  // body therefore means we never reached it — the proxy failed, or something
-  // else is serving this origin (e.g. another dev server on the same port).
+  // server/api.mjs always answers with JSON, including on error. A non-JSON
+  // body therefore means we never reached it — something else is serving this
+  // origin (e.g. another dev server on the same port, or a stale static build).
   const body = await res.text();
   let data: { authenticated?: boolean; expires_at?: number; error?: string };
   try {

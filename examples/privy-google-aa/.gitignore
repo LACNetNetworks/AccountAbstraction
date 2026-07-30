@@ -4,3 +4,6 @@
 *.db-journal
 *.db-wal
 *.db-shm
+
+# Local Vercel CLI state (linked project id, pulled env).
+.vercel

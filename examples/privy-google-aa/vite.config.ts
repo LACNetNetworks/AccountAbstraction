@@ -1,19 +1,14 @@
 import { defineConfig } from "vite";
 import react from "@vitejs/plugin-react";
+// @ts-expect-error - plain .mjs, no types; it is the same backend the deployed
+// function imports (see api/[...path].js).
+import { apiPlugin } from "./server/vite-api.mjs";
 
-// The frontend calls /api/* same-origin; Vite proxies it to the local session
-// backend (server/token-server.mjs) so the NAAS secret/password stay server-side
-// and the session cookie is a first-party cookie of the app's own origin.
-const TOKEN_SERVER = process.env.TOKEN_SERVER_ORIGIN || "http://127.0.0.1:8787";
-
+// One service, one port: the `/api` backend runs *inside* this dev server as
+// middleware instead of as a separate process behind a proxy, mirroring the
+// deployed shape (static build + `/api` function on the same domain). The NAAS
+// secret/password stay server-side, and the session cookie is a first-party
+// cookie of the app's own origin.
 export default defineConfig({
-  plugins: [react()],
-  server: {
-    proxy: {
-      "/api": {
-        target: TOKEN_SERVER,
-        changeOrigin: true,
-      },
-    },
-  },
+  plugins: [react(), apiPlugin()],
 });

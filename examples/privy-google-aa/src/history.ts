@@ -46,7 +46,7 @@ export async function fetchWriteLog(limit = 10): Promise<WriteLogEntry[]> {
       res = await get(limit);
     }
   } catch {
-    throw new Error("session backend not reachable — start it with `npm run server`");
+    throw new Error("write log endpoint not reachable — /api is served by this same app, so this means the server side is down");
   }
 
   const body = await res.text();
