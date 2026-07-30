@@ -13,3 +13,6 @@ out/
 # Node (bundler tooling)
 node_modules/
 dist/
+
+# macOS Finder metadata
+.DS_Store
